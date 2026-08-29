@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -112,7 +112,7 @@ XBSYSAPI EXPORTNUM(8) xbox::ulong_xt _cdecl xbox::DbgPrint
 		auto size = vsnprintf(nullptr, 0, Format, argp_copy);
 		va_end(argp_copy);
 
-        auto buffer = (char*)malloc(size + 1);
+        auto buffer = (char*)malloc(size);
         if (buffer == nullptr) {
             // Prevent a crash if we can't allocate enough memory
             // We want this to be transparent to the running Xbox application
@@ -121,7 +121,7 @@ XBSYSAPI EXPORTNUM(8) xbox::ulong_xt _cdecl xbox::DbgPrint
         }
 
         // Perform the actual print operation
-		vsnprintf(buffer, size + 1, Format, argp);
+		vsnprintf(buffer, size, Format, argp);
 		va_end(argp);
 
 		// Allow DbgPrint to be disabled

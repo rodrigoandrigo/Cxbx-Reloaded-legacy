@@ -43,6 +43,13 @@ extern "C" HWND CxbxKrnl_hEmuParent = NULL;
 
 void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 {
+#if defined(CXBXR_UWP)
+	// GUI and kernel share one process. State is surfaced through the UWP
+	// session/log callbacks, so no window message is required.
+	(void)command;
+	(void)value;
+	return;
+#else
 	// Don't send if kernel process didn't receive hwnd from GUI process.
 	if (CxbxKrnl_hEmuParent == nullptr) {
 		return;
@@ -71,14 +78,6 @@ void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 			cmdParam = ID_GUI_STATUS_OVERLAY;
 			break;
 
-		case IPC_UPDATE_GUI::WINDOW_HANDLE:
-			cmdParam = ID_GUI_STATUS_EMU_HWND;
-			break;
-
-		case IPC_UPDATE_GUI::WINDOW_DESTROYED:
-			cmdParam = ID_GUI_STATUS_EMU_HWND_DESTROY;
-			break;
-
 		default:
 			cmdParam = 0;
 			break;
@@ -88,11 +87,18 @@ void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 	if (cmdParam != 0) {
 		SendMessage(CxbxKrnl_hEmuParent, WM_PARENTNOTIFY, MAKEWPARAM(WM_COMMAND, cmdParam), value);
 	}
+#endif
 }
 #endif
 
 void ipc_send_kernel_update(IPC_UPDATE_KERNEL command, const int value, const unsigned int hwnd)
 {
+#if defined(CXBXR_UWP)
+	(void)command;
+	(void)value;
+	(void)hwnd;
+	return;
+#else
 	// Don't send if GUI process didn't create kernel process.
 	if (hwnd == NULL) {
 		return;
@@ -122,5 +128,5 @@ void ipc_send_kernel_update(IPC_UPDATE_KERNEL command, const int value, const un
 	if (cmdParam != 0) {
 		SendMessage(reinterpret_cast<HWND>(hwnd), WM_COMMAND, MAKEWPARAM(cmdParam, 0), value);
 	}
+#endif
 }
-

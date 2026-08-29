@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -36,30 +36,6 @@
 #define DEVKIT // developer kit only functions
 #define PROFILING // private kernel profiling functions
 // A.k.a. _XBOX_ENABLE_PROFILING
-
-// Kernel API availability flags per system type
-#define KAPI_RETAIL  (1 << 0)
-#define KAPI_DEVKIT  (1 << 1)
-#define KAPI_CHIHIRO (1 << 2)
-#define KAPI_ALL     (KAPI_RETAIL | KAPI_DEVKIT | KAPI_CHIHIRO)
-
-// Returns the system availability flags for a given kernel thunk ordinal.
-// On real hardware, the retail/chihiro kernel exports ordinals 1-366.
-// The debug kernel additionally exports ordinals 367-378.
-uint8_t CxbxKrnl_KernelThunkAvailability(int ordinal)
-{
-	if (ordinal >= 1 && ordinal <= 366) return KAPI_ALL;
-	if (ordinal >= 367 && ordinal <= 378) return KAPI_DEVKIT;
-	return 0; // ordinal 0 or out of range
-}
-
-// Returns the KAPI flag corresponding to the current emulated system
-uint8_t CxbxKrnl_GetCurrentSystemFlag()
-{
-	if (g_bIsDevKit) return KAPI_DEVKIT;
-	if (g_bIsChihiro) return KAPI_CHIHIRO;
-	return KAPI_RETAIL;
-}
 
 // kernel thunk table
 // Note : Names that collide with other symbols, use the KRNL() macro.

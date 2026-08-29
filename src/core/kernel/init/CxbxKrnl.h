@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -156,14 +156,11 @@ void CxbxKrnlPanic();
 void CxbxKrnlNoFunc();
 
 void InitDpcData(); // Implemented in EmuKrnlKe.cpp
-void ExecuteDpcQueue(bool inline_dispatch = false);
+bool IsDpcActive();
+void ExecuteDpcQueue();
 
 /*! kernel thunk table */
 extern uint32_t CxbxKrnl_KernelThunkTable[379];
-
-/*! kernel thunk availability per system type */
-uint8_t CxbxKrnl_KernelThunkAvailability(int ordinal);
-uint8_t CxbxKrnl_GetCurrentSystemFlag();
 
 extern bool g_bClipCursor;
 extern bool g_CxbxPrintUEM;

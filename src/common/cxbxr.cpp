@@ -153,6 +153,8 @@ bool HandleFirstLaunch()
 	}
 
 	EmuLogInit(LOG_LEVEL::INFO, "MAIN: Terminating Process");
+
+#ifndef CXBXR_UWP
 	fflush(stdout);
 
 	// cleanup debug output
@@ -164,6 +166,7 @@ bool HandleFirstLaunch()
 		if (GetConsoleTitle(buffer, 16) != NULL)
 			freopen("nul", "w", stdout);
 	}
+#endif
 
 	CxbxrShutDown();
 }

@@ -29,6 +29,8 @@
 
 #include "core\kernel\support\Emu.h"
 #include "EmuShared.h"
+#include <cstdlib>
+#include <new>
 
 #include <windows.h>
 #include <cstdio>
@@ -50,6 +52,20 @@ HMODULE hActiveModule = NULL;
 // ******************************************************************
 bool EmuShared::Init(long long sessionID)
 {
+#if defined(CXBXR_UWP)
+	(void)sessionID;
+	if (g_EmuShared) {
+		++g_EmuShared->m_RefCount;
+		return true;
+	}
+	// The desktop implementation relies on a zero-filled file mapping. Keep
+	// that constructor contract while making the object process-local for UWP.
+	void* storage = std::calloc(1, sizeof(EmuShared));
+	if (!storage) return false;
+	g_EmuShared = new (storage) EmuShared();
+	g_EmuShared->m_RefCount = 1;
+	return true;
+#else
     // ******************************************************************
     // * Ensure initialization only occurs once
     // ******************************************************************
@@ -126,6 +142,7 @@ bool EmuShared::Init(long long sessionID)
     }
 
 	return true;
+#endif
 }
 
 // ******************************************************************
@@ -133,6 +150,13 @@ bool EmuShared::Init(long long sessionID)
 // ******************************************************************
 void EmuShared::Cleanup()
 {
+#if defined(CXBXR_UWP)
+	if (g_EmuShared && --g_EmuShared->m_RefCount <= 0) {
+		g_EmuShared->EmuShared::~EmuShared();
+		std::free(g_EmuShared);
+		g_EmuShared = nullptr;
+	}
+#else
 	if (g_EmuShared != nullptr) {
 		if (--(g_EmuShared->m_RefCount) <= 0)
 			g_EmuShared->EmuShared::~EmuShared();
@@ -140,6 +164,7 @@ void EmuShared::Cleanup()
 		UnmapViewOfFile(g_EmuShared);
 		g_EmuShared = nullptr;
 	}
+#endif
 }
 
 // ******************************************************************

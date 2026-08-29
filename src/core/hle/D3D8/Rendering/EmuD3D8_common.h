@@ -63,6 +63,8 @@
 #include "core\hle\Intercept.hpp"
 #include "devices\video\nv2a.h"
 #include "gui/resource/ResCxbx.h"
+#include "RenderStates.h"
+#include "TextureStates.h"
 #include "WalkIndexBuffer.h"
 #include "core\kernel\common\strings.hpp"
 #include "common\input\SdlJoystick.h"
@@ -70,7 +72,7 @@
 #include "common\input\InputManager.h"
 #include "common/util/strConverter.hpp"
 #include "Shaders\CxbxFixedFunctionVertexShaderState.hlsli"
-#include "Backend/PatchDraw.h"
+#include "PatchDraw.h"
 #include "Timer.h"
 
 #include <imgui.h>

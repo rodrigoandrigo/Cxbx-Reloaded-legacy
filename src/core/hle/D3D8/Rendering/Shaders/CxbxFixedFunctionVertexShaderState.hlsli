@@ -44,8 +44,6 @@ namespace FixedFunctionVertexShader {
     const CXBX_STEERING_INT FOG_DEPTH_W = 2;
 	// Fog depth is based distance of the vertex from the eye position
     const CXBX_STEERING_INT FOG_DEPTH_RANGE = 3;
-	// Fog depth is abs(W) — ABS_PLANAR variant
-    const CXBX_STEERING_INT FOG_DEPTH_W_ABS = 4;
 }
 
 // Shared HLSL structures
@@ -63,8 +61,6 @@ struct Transforms {
 	// But we use combined WorldView matrices in the shader
     arr(WorldView, float4x4, 4); 
 	arr(WorldViewInverseTranspose, float4x4, 4);
-	// Texgen plane matrices (TG0MAT..TG3MAT) for EYE_LINEAR/OBJECT_LINEAR texgen
-	arr(TexgenMatrix, float4x4, 4);
 };
 
 // See D3DLIGHT
@@ -120,15 +116,6 @@ struct Modes {
     PADDED_INT(VertexBlend_NrOfMatrices);
     PADDED_INT(VertexBlend_CalcLastWeight); // Could be a bool in higer shader models
     PADDED_INT(NormalizeNormals);
-    PADDED_INT(UseDirectComposite); // When true, oPos = mul(position, Projection) directly (Projection = Proj×MV composite)
-    // Surface size for screen→NDC conversion (matches xemu surfaceSize uniform)
-    PADDED_FLOAT(SurfaceWidth);
-    PADDED_FLOAT(SurfaceHeight);
-    // Viewport offset from NV2A XFCTX (added to screen-space pos after CMAT multiply)
-    PADDED_FLOAT(ViewportOffsetX);
-    PADDED_FLOAT(ViewportOffsetY);
-    // Depth buffer max value (zmax) for Z normalization: 65535 for Z16, 16777215 for Z24S8
-    PADDED_FLOAT(DepthMax);
 };
 
 struct PointSprite {

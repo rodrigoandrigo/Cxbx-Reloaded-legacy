@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{8ed39cea-3a55-43ab-9114-f2226b167da9}</ProjectGuid>
+    <Keyword>DirectXXamlApp</Keyword>
+    <RootNamespace>Cxbx_R_uwp</RootNamespace>
+    <DefaultLanguage>pt-BR</DefaultLanguage>
+    <MinimumVisualStudioVersion>14.0</MinimumVisualStudioVersion>
+    <AppContainerApplication>true</AppContainerApplication>
+    <ApplicationType>Windows Store</ApplicationType>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.18362.0</WindowsTargetPlatformMinVersion>
+    <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
+    <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
+    <PackageCertificateKeyFile>Cxbx-R-uwp_TemporaryKey.pfx</PackageCertificateKeyFile>
+    <PackageCertificateThumbprint>1F76AF1E0FF6F021036150A678EB2E3573DAF7AD</PackageCertificateThumbprint>
+    <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseDotNetNativeToolchain>true</UseDotNetNativeToolchain>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ImageContentTask.props" />
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\MeshContentTask.props" />
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ShaderGraphContentTask.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Link>
+      <AdditionalDependencies>WindowsApp.lib; %(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories);$(VCInstallDir)\lib\store\amd64</AdditionalLibraryDirectories>
+    </Link>
+    <ClCompile>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(IntermediateOutputPath);$(ProjectDir)..\lib86cpu-uwp;$(ProjectDir)..\..\import\lib86cpu\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_DEBUG;CXBXR_UWP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Link>
+      <AdditionalDependencies>WindowsApp.lib; %(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories);$(VCInstallDir)\lib\store\amd64</AdditionalLibraryDirectories>
+    </Link>
+    <ClCompile>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(IntermediateOutputPath);$(ProjectDir)..\lib86cpu-uwp;$(ProjectDir)..\..\import\lib86cpu\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
+      <PreprocessorDefinitions>NDEBUG;CXBXR_UWP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <Image Include="Assets\LockScreenLogo.scale-200.png" />
+    <Image Include="Assets\SplashScreen.scale-200.png" />
+    <Image Include="Assets\Square150x150Logo.scale-200.png" />
+    <Image Include="Assets\Square44x44Logo.scale-200.png" />
+    <Image Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
+    <Image Include="Assets\StoreLogo.png" />
+    <Image Include="Assets\Wide310x150Logo.scale-200.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="App.xaml.h">
+      <DependentUpon>App.xaml</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="Common\DeviceResources.h" />
+    <ClInclude Include="Cxbx_R_uwpMain.h" />
+    <ClInclude Include="UwpStorageBroker.h" />
+	<ClInclude Include="UwpAudioHost.h" />
+	<ClInclude Include="..\..\src\core\kernel\init\UwpDeviceBus.h">
+	  <Link>Core\Kernel\UwpDeviceBus.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpBrokeredFileAccess.h">
+	  <Link>Core\Kernel\UwpBrokeredFileAccess.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\hle\D3D8\Rendering\UwpD3D11Host.h">
+      <Link>Core\Rendering\UwpD3D11Host.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpEmulatorSession.h">
+	  <Link>Core\Kernel\UwpEmulatorSession.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpKernelBridge.h">
+	  <Link>Core\Kernel\UwpKernelBridge.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpXboxPublicKey.h">
+	  <Link>Core\Kernel\UwpXboxPublicKey.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpNv2aProducer.h">
+	  <Link>Core\Kernel\UwpNv2aProducer.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpXisoReader.h">
+	  <Link>Core\Kernel\UwpXisoReader.h</Link>
+	</ClInclude>
+	<ClInclude Include="..\..\src\core\kernel\init\UwpDeviceInterrupts.h" />
+    <ClInclude Include="DirectXPage.xaml.h">
+      <DependentUpon>DirectXPage.xaml</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="Common\DirectXHelper.h" />
+    <ClInclude Include="Common\StepTimer.h" />
+    <ClInclude Include="pch.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="App.xaml.cpp">
+      <DependentUpon>App.xaml</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="Common\DeviceResources.cpp" />
+    <ClCompile Include="Cxbx_R_uwpMain.cpp" />
+    <ClCompile Include="UwpStorageBroker.cpp" />
+	<ClCompile Include="UwpAudioHost.cpp">
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpDeviceBus.cpp">
+	  <Link>Core\Kernel\UwpDeviceBus.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	  <LanguageStandard>stdcpp20</LanguageStandard>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\hle\D3D8\Rendering\UwpD3D11Host.cpp">
+      <Link>Core\Rendering\UwpD3D11Host.cpp</Link>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpEmulatorSession.cpp">
+	  <Link>Core\Kernel\UwpEmulatorSession.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpLib86CpuExecutor.cpp">
+	  <Link>Core\Kernel\UwpLib86CpuExecutor.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	  <LanguageStandard>stdcpp20</LanguageStandard>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpKernelBridge.cpp">
+	  <Link>Core\Kernel\UwpKernelBridge.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	  <LanguageStandard>stdcpp20</LanguageStandard>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpNv2aProducer.cpp">
+	  <Link>Core\Kernel\UwpNv2aProducer.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	  <LanguageStandard>stdcpp20</LanguageStandard>
+	</ClCompile>
+	<ClCompile Include="..\..\src\core\kernel\init\UwpXisoReader.cpp">
+	  <Link>Core\Kernel\UwpXisoReader.cpp</Link>
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <CompileAsWinRT>false</CompileAsWinRT>
+	  <LanguageStandard>stdcpp20</LanguageStandard>
+	</ClCompile>
+	<ClCompile Include="..\..\src\common\crypto\EmuSha.cpp"><Link>Core\Crypto\EmuSha.cpp</Link><PrecompiledHeader>NotUsing</PrecompiledHeader><CompileAsWinRT>false</CompileAsWinRT></ClCompile>
+	<ClCompile Include="..\..\src\common\crypto\LibRc4.cpp"><Link>Core\Crypto\LibRc4.cpp</Link><PrecompiledHeader>NotUsing</PrecompiledHeader><CompileAsWinRT>false</CompileAsWinRT></ClCompile>
+	<ClCompile Include="..\..\src\common\crypto\EmuDes.cpp"><Link>Core\Crypto\EmuDes.cpp</Link><PrecompiledHeader>NotUsing</PrecompiledHeader><CompileAsWinRT>false</CompileAsWinRT></ClCompile>
+    <ClCompile Include="DirectXPage.xaml.cpp">
+      <DependentUpon>DirectXPage.xaml</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\src\core\hle\D3D8\Rendering\Shaders\**\*.hlsl">
+      <Link>Backend_D3D11\Shaders\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <DeploymentContent>true</DeploymentContent>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\COPYING">
+      <Link>Licenses\Cxbx-Reloaded-COPYING.txt</Link>
+      <DeploymentContent>true</DeploymentContent>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\README.md">
+      <Link>Port\README.md</Link>
+      <DeploymentContent>true</DeploymentContent>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+	<Content Include="..\X64_EXECUTOR.md">
+	  <Link>Port\X64_EXECUTOR.md</Link>
+	  <DeploymentContent>true</DeploymentContent>
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+	<Content Include="..\..\import\lib86cpu\LICENSE.txt">
+	  <Link>Licenses\lib86cpu-LICENSE.txt</Link>
+	  <DeploymentContent>true</DeploymentContent>
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="Shaders\UwpGuestFrameVS.hlsl">
+      <ShaderType>Vertex</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>main</EntryPointName>
+      <HeaderFileOutput>$(IntDir)UwpGuestFrameVS.h</HeaderFileOutput>
+      <VariableName>g_UwpGuestFrameVS</VariableName>
+    </FxCompile>
+    <FxCompile Include="Shaders\UwpGuestFramePS.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>main</EntryPointName>
+      <HeaderFileOutput>$(IntDir)UwpGuestFramePS.h</HeaderFileOutput>
+      <VariableName>g_UwpGuestFramePS</VariableName>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\lib86cpu-uwp\lib86cpu-uwp.vcxproj">
+      <Project>{BC31F8E6-8A11-49D0-AC7C-FA3E00A49E21}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <SetPlatform>Platform=x64</SetPlatform>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml">
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+    <Page Include="DirectXPage.xaml">
+      <SubType>Designer</SubType>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Cxbx-R-uwp_TemporaryKey.pfx" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ImageContentTask.targets" />
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\MeshContentTask.targets" />
+    <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ShaderGraphContentTask.targets" />
+  </ImportGroup>
+</Project>

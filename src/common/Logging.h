@@ -31,6 +31,7 @@
 #include <iostream> // For std::cout
 #include <iomanip> // For std::setw
 #include <atomic> // For atomic_bool and atomic_uint
+#include <filesystem>
 #include "common\util\CxbxUtil.h" // For g_bPrintfOn and to_underlying
 
 // NOTE: using ERROR2 since windows.h imports an ERROR macro which would conflict otherwise
@@ -120,6 +121,13 @@ extern std::atomic_bool g_EnabledModules[to_underlying(CXBXR_MODULE::MAX)];
 extern const char* g_EnumModules2String[to_underlying(CXBXR_MODULE::MAX)];
 extern std::atomic_int g_CurrentLogLevel;
 extern std::atomic_bool g_CurrentLogPopupTestCase;
+
+// Platform-neutral log sinks. UWP must configure a callback and/or a file in
+// ApplicationData::Current->LocalFolder instead of allocating a console.
+typedef void (*CxbxrLogCallback)(const char* message, void* context);
+void CxbxrSetLogCallback(CxbxrLogCallback callback, void* context);
+void CxbxrSetLogFilePath(const std::filesystem::path& path);
+void CxbxrSetConsoleLogging(bool enabled);
 
 // print out a log message to the console or kernel debug log file if level is high enough
 void EmuLogEx(CXBXR_MODULE cxbxr_module, LOG_LEVEL level, _Printf_format_string_ const char *szWarningMessage, ...);
@@ -297,17 +305,6 @@ LOG_SANITIZE(sanitized_char, char);
 LOG_SANITIZE(sanitized_wchar, wchar_t);
 LOG_SANITIZE(sanitized_char_pointer, char *);
 LOG_SANITIZE(sanitized_wchar_pointer, wchar_t *);
-
-// Const pointer overloads — without these, const char*/wchar_t* falls through to
-// the generic template which passes them raw to ostream, crashing on NULL.
-inline Sanesanitized_char_pointer _log_sanitize(const char* value, int max = 80)
-{
-	return sanitized_char_pointer(const_cast<char*>(value), max);
-}
-inline Sanesanitized_wchar_pointer _log_sanitize(const wchar_t* value, int max = 80)
-{
-	return sanitized_wchar_pointer(const_cast<wchar_t*>(value), max);
-}
 
 
 //

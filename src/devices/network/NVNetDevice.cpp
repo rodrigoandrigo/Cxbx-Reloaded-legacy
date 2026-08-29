@@ -511,7 +511,6 @@ void NVNetDevice::Init()
 
 	m_DeviceId = 0x01C3;
 	m_VendorId = PCI_VENDOR_ID_NVIDIA;
-	m_RevisionAndClassCode = 0x020000A1; // Ethernet controller, rev A1
 
 	memset(NvNetState.regs, 0, sizeof(NvNetState.regs));
 	NvNetState.rx_ring_index = 0;

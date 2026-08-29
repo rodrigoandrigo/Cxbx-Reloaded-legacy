@@ -91,8 +91,6 @@ typedef void* LPSECURITY_ATTRIBUTES;
 #define X_STATUS_BUFFER_TOO_SMALL 0xC0000023L
 #define X_STATUS_INVALID_PARAMETER 0xC000000DL
 #define X_STATUS_INVALID_PARAMETER_2 0xC00000F0L
-#define X_STATUS_INVALID_PARAMETER_4 0xC00000F2L
-#define X_STATUS_INVALID_PARAMETER_7 0xC00000F5L
 #define X_STATUS_ALERTED 0x00000101L
 #define X_STATUS_USER_APC 0x000000C0L
 #define X_STATUS_DATA_OVERRUN 0xC000003CL // The SCSI input buffer was too large (not necessarily an error!)
@@ -559,6 +557,10 @@ typedef struct _OBJECT_HEADER {
 	ulong_xt Flags;
 	quad_xt Body;
 } OBJECT_HEADER, *POBJECT_HEADER;
+
+// Source : DXBX
+typedef ulong_ptr_xt KSPIN_LOCK;
+typedef KSPIN_LOCK *PKSPIN_LOCK;
 
 // ******************************************************************
 // * FILETIME
@@ -1919,7 +1921,7 @@ typedef struct _KSTART_FRAME
 typedef struct _KSWITCHFRAME
 {
 	PVOID ExceptionList;
-	dword_xt Eflags;
+	dword_xt Unknown;
 	PVOID RetAddr;
 } KSWITCHFRAME, *PKSWITCHFRAME;
 
@@ -2123,7 +2125,7 @@ static_assert(sizeof(ETHREAD) == 0x140);
 // ******************************************************************
 // * PCREATE_THREAD_NOTIFY_ROUTINE
 // ******************************************************************
-typedef void_xt(NTAPI *PCREATE_THREAD_NOTIFY_ROUTINE)
+typedef void_xt(*PCREATE_THREAD_NOTIFY_ROUTINE)
 (
 	IN PETHREAD Thread,
 	IN HANDLE ThreadId,
@@ -2931,7 +2933,7 @@ typedef struct _IRP
 			union {
 				KDEVICE_QUEUE_ENTRY DeviceQueueEntry;
 				struct {
-					PVOID DriverContext[5];
+					PVOID DriverContext[4];
 				};
 			};
 			PETHREAD Thread;

@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -33,7 +33,6 @@
 #include <string>
 #include <sstream>
 #include <fstream>
-#include <atomic>
 #include <cassert>
 #include <Shlobj.h>
 #include <Shlwapi.h>
@@ -267,21 +266,6 @@ void NTAPI CxbxIoApcDispatcher(PVOID ApcContext, xbox::PIO_STATUS_BLOCK /*IoStat
 	std::get<xbox::PIO_APC_ROUTINE>(*cxbxContext)(
 		std::get<LPVOID>(*cxbxContext),std::get<xbox::PIO_STATUS_BLOCK>(*cxbxContext), Reserved);
 	delete cxbxContext;
-}
-
-void NTAPI CxbxIoEventApcDispatcher(PVOID ApcContext, xbox::PIO_STATUS_BLOCK IoStatusBlock, xbox::ulong_xt Reserved)
-{
-	CxbxIoEventContext* ctx = reinterpret_cast<CxbxIoEventContext*>(ApcContext);
-
-	// Signal the Xbox event to wake any thread waiting on it
-	xbox::KeSetEvent(ctx->Event, /*Increment=*/1, /*Wait=*/FALSE);
-
-	// If the game also provided an APC routine, call it
-	if (ctx->OriginalApc) {
-		ctx->OriginalApc(ctx->OriginalContext, ctx->IoStatusBlock, Reserved);
-	}
-
-	delete ctx;
 }
 
 const std::string PartitionPrefix = "Partition";
@@ -706,7 +690,7 @@ void CxbxLaunchNewXbe(const std::string& XbePath) {
 	}
 	else
 	{
-		if (const auto &err = CxbxrExec(false, nullptr, false, /*isReboot=*/true))
+		if (const auto &err = CxbxrExec(false, nullptr, false))
 		{
 			CxbxrAbort("Could not launch %s\n\nThe reason was: %s", XbePath.c_str(), err->c_str());
 		}

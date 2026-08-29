@@ -1,7 +1,7 @@
 // VertexShaderCache.cpp — Runtime NV2A→HLSL JIT compiler + cache
 //
 // Translates NV2A vertex transform microcode into straight-line HLSL,
-// compiles with D3DCompile, caches by hash of program tokens.
+// compiles with D3DCompile, caches by FNV-1a hash of program tokens.
 // A typical 20-instruction NV2A program becomes ~30 lines of HLSL
 // with zero loops — orders of magnitude faster than interpreting.
 
@@ -216,59 +216,11 @@ static void EmitOperation(std::ostringstream& ss, const Nv2aVshOperation& op, bo
 }
 
 // ============================================================
-// Prescan: collect register usage info for dead-code suppression
-// ============================================================
-struct VshUsageInfo {
-    uint16_t usedInputs;    // bitmask of v[i] actually read
-    uint16_t writtenTemps;  // bitmask of r0-r11 written as destination
-    bool     usesA0;        // true if ARL opcode or is_relative context access
-};
-
-static VshUsageInfo PrescanProgram(const uint32_t program_data[][4], uint32_t startAddr, uint32_t instrCount)
-{
-    VshUsageInfo info = { 0, 0, false };
-
-    for (uint32_t i = 0; i < instrCount; i++) {
-        Nv2aVshStep step = {};
-        if (nv2a_vsh_parse_step(&step, program_data[startAddr + i]) != NV2AVPR_SUCCESS)
-            continue;
-
-        for (const auto* op : { &step.mac, &step.ilu }) {
-            if (op->opcode == NV2AOP_NOP) continue;
-
-            // Check for ARL
-            if (op->opcode == NV2AOP_ARL)
-                info.usesA0 = true;
-
-            // Scan inputs
-            for (int j = 0; j < 3; j++) {
-                const auto& inp = op->inputs[j];
-                if (inp.type == NV2ART_INPUT)
-                    info.usedInputs |= (1u << inp.index);
-                if (inp.type == NV2ART_CONTEXT && inp.is_relative)
-                    info.usesA0 = true;
-            }
-
-            // Scan outputs for temp writes
-            for (int o = 0; o < 2; o++) {
-                const auto& out = op->outputs[o];
-                if (out.type == NV2ART_TEMPORARY && out.index < 12)
-                    info.writtenTemps |= (1u << out.index);
-            }
-        }
-    }
-    return info;
-}
-
-// ============================================================
 // Main translation function: NV2A program → HLSL source
 // ============================================================
 static std::string TranslateToHLSL(const uint32_t program_data[][4], uint32_t startAddr, uint32_t instrCount)
 {
     std::ostringstream ss;
-
-    // Prescan to determine which registers are actually used
-    VshUsageInfo usage = PrescanProgram(program_data, startAddr, instrCount);
 
     // Preamble — include all shared headers
     ss << "// JIT-compiled NV2A vertex shader (" << instrCount << " instructions)\n";
@@ -280,42 +232,21 @@ static std::string TranslateToHLSL(const uint32_t program_data[][4], uint32_t st
     ss << "#define X_D3DVS_CONSTREG_COUNT 192\n";
     ss << "uniform float4 C[X_D3DVS_CONSTREG_COUNT] : register(c0);\n\n";
     ss << "VS_OUTPUT main(const VS_INPUT xIn)\n{\n";
-
-    // Fetch only the input attributes actually read by the program
     ss << "    float4 v[16];\n";
-    ss << "    uint _vtxIdx = ResolveVertexIndex(xIn.vertexId);\n";
-    for (int i = 0; i < 16; i++) {
-        if (usage.usedInputs & (1u << i))
-            ss << "    v[" << i << "] = FetchAttribute(_vtxIdx, Attribs[" << i << "], g_VtxDefaults[" << i << "]);\n";
-        else
-            ss << "    v[" << i << "] = 0;\n";
-    }
-    ss << "\n";
+    ss << "    FetchAllAttributes(ResolveVertexIndex(xIn.vertexId), v);\n\n";
 
-    // Declare only temp registers that are actually written
-    for (int i = 0; i < 12; i++) {
-        if (usage.writtenTemps & (1u << i))
-            ss << "    float4 r" << i << " = 0;\n";
-    }
-    if (usage.writtenTemps) ss << "\n";
-
-    // Output registers — xemu defaults all to vec4(0,0,0,1).
-    // We deviate for some until proper fixed-function fog/diffuse is implemented.
+    // Declare temp registers — r0-r11 start at zero (NV2A hardware)
+    ss << "    float4 r0=0, r1=0, r2=0, r3=0, r4=0, r5=0;\n";
+    ss << "    float4 r6=0, r7=0, r8=0, r9=0, r10=0, r11=0;\n";
+    // Output registers — must match NV2A hardware defaults:
+    //   oPos/oT0-oT3: W=1 (homogeneous), oD0/oD1/oB0/oB1/oFog: all 1 (white/full)
     ss << "    float4 oPos = float4(0,0,0,1);\n";
-    ss << "    float4 oD0  = float4(1,1,1,1);\n";   // TODO: xemu uses (0,0,0,1)
-    ss << "    float4 oD1  = float4(0,0,0,1);\n";   // specular must default black — white saturates V1R0_SUM (Water)
-    ss << "    float4 oB0  = float4(1,1,1,1);\n";   // TODO: xemu uses (0,0,0,1)
-    ss << "    float4 oB1  = float4(0,0,0,1);\n";   // back-face specular, same reasoning as oD1
-    ss << "    float4 oFog = float4(1,1,1,1);\n";   // TODO: xemu uses (0,0,0,1) — (0,0,0,1) turns labels white via fog (Water)
-    ss << "    float4 oPts = float4(0,0,0,0);\n";
-    ss << "    float4 oT0  = float4(0,0,0,1);\n";
-    ss << "    float4 oT1  = float4(0,0,0,1);\n";
-    ss << "    float4 oT2  = float4(0,0,0,1);\n";
-    ss << "    float4 oT3  = float4(0,0,0,1);\n";
-    // Address register — only declare if ARL or relative context access is used
-    if (usage.usesA0)
-        ss << "    int a0 = 0;\n";
-    ss << "\n";
+    ss << "    float4 oD0 = float4(1,1,1,1), oD1 = float4(1,1,1,1);\n";
+    ss << "    float4 oFog = float4(1,1,1,1), oPts = float4(0,0,0,0);\n";
+    ss << "    float4 oB0 = float4(1,1,1,1), oB1 = float4(1,1,1,1);\n";
+    ss << "    float4 oT0 = float4(0,0,0,1), oT1 = float4(0,0,0,1);\n";
+    ss << "    float4 oT2 = float4(0,0,0,1), oT3 = float4(0,0,0,1);\n";
+    ss << "    int a0 = 0;\n\n";
 
     // Translate each instruction
     for (uint32_t i = 0; i < instrCount; i++) {

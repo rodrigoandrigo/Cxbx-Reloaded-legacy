@@ -41,6 +41,12 @@
 #include <unordered_map>
 #include <wrl/client.h>
 
+extern ID3D11Device *g_pD3DDevice;
+
+// Xbox state globals (defined in RenderGlobals.cpp)
+class XboxRenderStateConverter;
+extern XboxRenderStateConverter  XboxRenderStates;
+
 #define CXBX_D3DCOMMON_IDENTIFYING_MASK (X_D3DCOMMON_TYPE_MASK | X_D3DCOMMON_D3DCREATED)
 
 typedef struct resource_key_hash {
@@ -71,6 +77,19 @@ typedef struct resource_key_hash {
 		return (size_t)ComputeHash((void*)&value, sizeof(value));
 	}
 } resource_key_t;
+
+// information passed to the create device proxy thread
+struct EmuD3D8CreateDeviceProxyData
+{
+	IDXGIAdapter*  Adapter;
+	D3D_DRIVER_TYPE   DeviceType;
+	struct {
+		UINT BackBufferWidth;
+		UINT BackBufferHeight;
+		UINT FullScreen_RefreshRateInHz;
+		BOOL Windowed;
+	} HostPresentationParameters;
+};
 
 // LTCG prologue/epilogue macros for __declspec(naked) patches
 #define LTCG_PROLOGUE \
@@ -109,9 +128,11 @@ extern bool                          g_bHasStencil;
 extern float                         g_AspectRatioScale;
 extern UINT                          g_AspectRatioScaleWidth;
 extern UINT                          g_AspectRatioScaleHeight;
+extern D3D11_TEXTURE2D_DESC          g_HostBackBufferDesc;
 extern Settings::s_video             g_XBVideo;
 extern bool                          g_bEnableHostQueryVisibilityTest;
 extern bool                          g_bHack_DisableHostGPUQueries;
+extern ID3D11Query                  *g_pHostQueryWaitForIdle;
 extern int                           g_RenderUpscaleFactor;
 extern xbox::X_D3DMULTISAMPLE_TYPE   g_Xbox_MultiSampleType;
 
@@ -120,6 +141,8 @@ extern xbox::X_D3DMULTISAMPLE_TYPE   g_Xbox_MultiSampleType;
 // CxbxUpdateHostTextures to resolve PGRAPH TEXOFFSET values to Xbox textures.
 void CxbxRegisterTextureByDataAddr(xbox::addr_xt dataAddr, xbox::X_D3DBaseTexture *pTexture);
 xbox::X_D3DBaseTexture* CxbxLookupTextureByDataAddr(xbox::addr_xt dataAddr);
+
+extern EmuD3D8CreateDeviceProxyData  g_EmuCDPD;
 
 void LookupTrampolinesD3D();
 
@@ -135,11 +158,34 @@ void CxbxUpdateNativeD3DResources();
 void CxbxSetVertexShaderConstantF(UINT startRegister, const float* pConstantData, UINT Vector4fCount);
 
 // Rendering helpers (implemented in Backend_D3D11*.cpp)
+HRESULT CxbxSetRenderTarget(ID3D11Texture2D* pHostRenderTarget, UINT mipSlice = 0, UINT arraySlice = 0);
 void    CxbxD3DClear(DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil);
+void    CxbxSetViewport(D3D11_VIEWPORT *pHostViewport);
 void    CxbxSetScissorRect(CONST RECT *pHostViewportRect);
+HRESULT CxbxBltSurface(ID3D11Texture2D* pSrc, const RECT* pSrcRect, ID3D11Texture2D* pDst, const RECT* pDstRect, D3DTEXTUREFILTERTYPE Filter);
 HRESULT CxbxPresent();
+void    CxbxSetDepthStencilSurface(ID3D11Texture2D* pHostDepthStencil);
+ID3D11Texture2D* CxbxGetCurrentRenderTarget(); // Returns current RT (non-owning pointer)
+HRESULT CxbxGetBackBuffer(ID3D11Texture2D** ppBackBuffer); // Returns back buffer (caller owns ref)
+HRESULT CxbxSetStreamSource(UINT HostStreamNumber, ID3D11Buffer* pHostVertexBuffer, UINT VertexStride);
+void    CxbxRawSetPixelShader(ID3D11PixelShader* pPixelShader);
 void    CxbxInvalidateActivePixelShader(); // Reset PS state tracking after blit/present
+HRESULT CxbxSetVertexShader(ID3D11VertexShader* pHostVertexShader);
 
+
+// Reusable grow-to-fit dynamic buffer for D3D11.
+// Avoids per-draw CreateBuffer/Release overhead for temporary vertex/index buffers.
+struct CxbxDynBuffer {
+	ID3D11Buffer *pBuffer = nullptr;
+	UINT          capacity = 0;   // Current buffer size in bytes
+	UINT          bindFlags = 0;  // D3D11_BIND_VERTEX_BUFFER or D3D11_BIND_INDEX_BUFFER
+
+	// Ensure the buffer is at least 'size' bytes, then map-discard and memcpy data in.
+	// Returns the (still-bound) buffer, or nullptr on failure.
+	ID3D11Buffer *Update(const void *pData, UINT size);
+	void Release();
+	~CxbxDynBuffer() { Release(); }
+};
 
 // BeginScene/EndScene: no-ops in D3D11
 inline void CxbxBeginScene()
@@ -148,6 +194,25 @@ inline void CxbxBeginScene()
 
 inline void CxbxEndScene()
 {
+}
+
+// D3D11 device context (declared in Backend_D3D11.h, needed by query helpers below)
+extern ID3D11DeviceContext *g_pD3DDeviceContext;
+
+// Query helpers
+inline void CxbxQueryIssueBegin(ID3D11Query* pQuery)
+{
+	g_pD3DDeviceContext->Begin(pQuery);
+}
+
+inline void CxbxQueryIssueEnd(ID3D11Query* pQuery)
+{
+	g_pD3DDeviceContext->End(pQuery);
+}
+
+inline HRESULT CxbxQueryGetData(ID3D11Query* pQuery, void* pData, DWORD dwSize, DWORD dwGetDataFlags)
+{
+	return g_pD3DDeviceContext->GetData(pQuery, pData, dwSize, dwGetDataFlags);
 }
 
 // Xbox resource type helpers (used in HostResource.cpp, HostSync.cpp, etc.)
@@ -184,8 +249,23 @@ extern xbox::X_D3DBaseTexture *g_pXbox_SetTexture[xbox::X_D3DTS_STAGECOUNT];
 
 // Cross-file function declarations (defined in various Host*.cpp files)
 
-// Swap present forward marker
+// Swap present forward marker (used in EmuPatches_Surface.cpp, EmuPatches_Misc.cpp)
 #define CXBX_SWAP_PRESENT_FORWARD (256 + X_D3DSWAP_FINISH + X_D3DSWAP_COPY) // = CxbxPresentForwardMarker + D3DSWAP_FINISH + D3DSWAP_COPY
+
+// Resource cache types (defined in HostResource.cpp)
+constexpr DWORD D3DUSAGE_INVALID = 0xFFFFFFFF;
+
+typedef struct _resource_info_t {
+	Microsoft::WRL::ComPtr<ID3D11Resource> pHostResource;
+	DXGI_FORMAT HostFormat = EMUFMT_UNKNOWN;
+	DWORD HostUsage = D3DUSAGE_INVALID;
+	DWORD dwXboxResourceType = 0;
+	void* pXboxData = xbox::zeroptr;
+	size_t szXboxDataSize = 0;
+	uint32_t lastAccessFrame = 0; // Frame counter for LRU eviction
+} resource_info_t;
+
+typedef std::unordered_map<resource_key_t, resource_info_t, resource_key_hash> resource_cache_t;
 
 // HostDevice.cpp
 void UpdateHostBackBufferDesc();
@@ -195,6 +275,7 @@ void GetMultiSampleOffset(float& xOffset, float& yOffset);
 void GetMultiSampleScaleRaw(float& xScale, float& yScale);
 void GetScreenScaleFactors(float& scaleX, float& scaleY);
 void GetRenderTargetBaseDimensions(float& x, float& y);
+void UpdateDepthStencilFlags(ID3D11Texture2D *pDepthStencilSurface);
 void SetupPresentationParameters(const xbox::X_D3DPRESENT_PARAMETERS *pXboxPresentationParameters);
 void DetermineSupportedD3DFormats();
 
@@ -209,27 +290,62 @@ void CreateDefaultDevice(const xbox::X_D3DPRESENT_PARAMETERS* pPresentationParam
 xbox::X_D3DRESOURCETYPE GetXboxD3DResourceType(const xbox::X_D3DResource* pXboxResource);
 void* GetDataFromXboxResource(xbox::X_D3DResource* pXboxResource);
 resource_key_t GetHostResourceKey(xbox::X_D3DResource* pXboxResource, int iTextureStage = -1);
+void SetHostResource(xbox::X_D3DResource* pXboxResource, ID3D11Resource* pHostResource, int iTextureStage = -1, DWORD D3DUsage = 0xFFFFFFFFu, DXGI_FORMAT PCFormat = EMUFMT_UNKNOWN);
+void FreeHostResource(resource_key_t key);
+ID3D11Texture2D* GetHostSurface(xbox::X_D3DResource* pXboxResource, DWORD D3DUsage = 0);
+ID3D11Resource* GetHostBaseTexture(xbox::X_D3DResource* pXboxResource, DWORD D3DUsage = 0, int iTextureStage = 0);
+ID3D11Resource* GetHostBaseTextureWithFormat(xbox::X_D3DResource* pXboxResource, DWORD D3DUsage, int iTextureStage, DXGI_FORMAT* pOutHostFormat);
+ID3D11Texture3D* GetHostVolumeTexture(xbox::X_D3DResource* pXboxResource, int iTextureStage = 0);
 void ClearAllResourceCaches();
 uint32_t GetPixelContainerWidth(xbox::X_D3DPixelContainer *pPixelContainer);
 uint32_t GetPixelContainerHeight(xbox::X_D3DPixelContainer *pPixelContainer);
 unsigned int CxbxGetPixelContainerMipMapLevels(xbox::X_D3DPixelContainer *pPixelContainer);
 void GetSurfaceFaceAndLevelWithinTexture(xbox::X_D3DSurface* pSurface, xbox::X_D3DBaseTexture* pTexture, UINT& Level, int& Face);
 void GetSurfaceFaceAndLevelWithinTexture(xbox::X_D3DSurface* pSurface, xbox::X_D3DBaseTexture* pBaseTexture, UINT& Level);
+resource_cache_t& GetResourceCache(resource_key_t& key);
 void PrunePaletizedTexturesCache();
-void PruneResourceCache();
 void CxbxGetPixelContainerMeasures(xbox::X_D3DPixelContainer *pPixelContainer, DWORD dwMipMapLevel, UINT *pWidth, UINT *pHeight, UINT *pDepth, UINT *pRowPitch, UINT *pSlicePitch);
 void CreateHostResource(xbox::X_D3DResource *pResource, DWORD D3DUsage, int iTextureStage, DWORD dwSize);
 int XboxD3DPaletteSizeToBytes(const xbox::X_D3DPALETTESIZE Size);
 xbox::X_D3DPALETTESIZE GetXboxPaletteSize(const xbox::X_D3DPalette *pPalette);
 
+// Inline resource setters
+inline void SetHostSurface(xbox::X_D3DResource* pXboxResource, ID3D11Texture2D* pHostSurface, int iTextureStage = -1)
+{
+	SetHostResource(pXboxResource, (ID3D11Resource*)pHostSurface, iTextureStage);
+}
+
+inline void SetHostVolume(xbox::X_D3DResource* pXboxResource, ID3D11Texture3D* pHostVolume, int iTextureStage = -1)
+{
+	SetHostResource(pXboxResource, (ID3D11Resource*)pHostVolume, iTextureStage);
+}
+
+inline void SetHostTexture(xbox::X_D3DResource* pXboxResource, ID3D11Texture2D* pHostTexture, int iTextureStage = -1)
+{
+	SetHostResource(pXboxResource, (ID3D11Resource*)pHostTexture, iTextureStage);
+}
+
+inline void SetHostVolumeTexture(xbox::X_D3DResource* pXboxResource, ID3D11Texture3D* pHostVolumeTexture, int iTextureStage = -1)
+{
+	SetHostResource(pXboxResource, (ID3D11Resource*)pHostVolumeTexture, iTextureStage);
+}
+
+inline void SetHostCubeTexture(xbox::X_D3DResource* pXboxResource, ID3D11Texture2D* pHostCubeTexture, int iTextureStage = -1)
+{
+	SetHostResource(pXboxResource, (ID3D11Resource*)pHostCubeTexture, iTextureStage);
+}
+
 // HostRender.cpp
+bool GetHostRenderTargetDimensions(DWORD *pHostWidth, DWORD *pHostHeight, ID3D11Texture2D* pHostRenderTarget = nullptr);
 void UpdateFixedFunctionVertexShaderState();
-void InvalidateFixedFunctionStateCache(); // Call after VP constants overwrite the shared cbuffer
 void CxbxUpdateHostViewPortOffsetAndScaleConstants();
 
 // HostResourceCreate.cpp
 D3DXVECTOR4 toVector(D3DCOLOR color);
 D3DXVECTOR4 toVector(xbox::X_D3DCOLORVALUE val);
+
+// HostSync.cpp
+void CxbxD3D11InvalidateCachedSRVForTexture(ID3D11Resource* pTexture);
 
 // HostWindow.cpp
 void DrawUEM(HWND hWnd);
@@ -243,7 +359,8 @@ const char *CxbxGetErrorDescription(HRESULT hResult);
 // CxbxrImpl_GetBackBuffer2 — removed (only used by disabled GetBackBuffer patches).
 // xbox::X_D3DSurface* CxbxrImpl_GetBackBuffer2(xbox::int_xt BackBuffer);
 
-// Xbox function trampolines -- defined in RenderGlobals.cpp.
+// Xbox function trampolines -- defined in RenderGlobals.cpp, used across
+// multiple EmuPatches_*.cpp translation units.
 // XB_TRAMPOLINES lists all D3D8 trampolines; we invoke it here with an
 // "extern" generator so every TU that includes this header sees the
 // declarations.  The actual definitions live in RenderGlobals.cpp.
@@ -326,5 +443,14 @@ const char *CxbxGetErrorDescription(HRESULT hResult);
 XB_TRAMPOLINES(XB_trampoline_extern);
 #undef XB_trampoline_extern
 
+
+// EMUPATCH declarations split into topic-specific headers:
+#include "Patches/EmuPatches_Device.h"
+#include "Patches/EmuPatches_Draw.h"
+#include "Patches/EmuPatches_Misc.h"
+#include "Patches/EmuPatches_Shader.h"
+#include "Patches/EmuPatches_State.h"
+#include "Patches/EmuPatches_Surface.h"
+// EmuPatches_Unused.h intentionally not included - it's a documentation-only dustbin
 
 #endif // RENDERGLOBALS_H

@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -552,9 +552,7 @@ void VMManager::MemoryStatistics(xbox::PMM_STATISTICS memory_statistics)
 	memory_statistics->CachePagesCommitted = m_PagesByUsage[xbox::CacheType];
 	memory_statistics->PoolPagesCommitted = m_PagesByUsage[xbox::PoolType];
 	memory_statistics->StackPagesCommitted = m_PagesByUsage[xbox::StackType];
-	if (memory_statistics->Length >= sizeof(xbox::MM_STATISTICS)) {
-		memory_statistics->ImagePagesCommitted = m_PagesByUsage[xbox::ImageType];
-	}
+	memory_statistics->ImagePagesCommitted = m_PagesByUsage[xbox::ImageType];
 
 	Unlock();
 }
@@ -566,13 +564,14 @@ VAddr VMManager::ClaimGpuMemory(size_t Size, size_t* BytesToSkip)
 		LOG_FUNC_ARG(*BytesToSkip)
 	LOG_FUNC_END;
 
-	// On real Xbox, instance memory is accessed through both the NV2A PRAMIN
-	// MMIO window (0xFD700000) and the contiguous mapping.  Both paths alias the
-	// same physical VRAM.  In our emulator the PRAMIN MMIO pages are a separate
-	// VirtualAlloc so we return the PRAMIN MMIO base directly — the D3D runtime
-	// writes DMA objects and RAMHT entries there, and ramin_ptr already points
-	// to the same address, keeping everything coherent.
-	*BytesToSkip = 0;
+	// Note that, even though devkits have 128 MiB, there's no need to have a different case for those, since the instance
+	// memory is still located 0x10000 bytes from the top of memory just like retail consoles
+
+	if (m_MmLayoutChihiro)
+		*BytesToSkip = 0;
+	else
+		*BytesToSkip = CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(X64M_PHYSICAL_PAGE) -
+		CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(XBOX_INSTANCE_PHYSICAL_PAGE + NV2A_INSTANCE_PAGE_COUNT);
 
 	if (Size != MAXULONG_PTR)
 	{
@@ -625,7 +624,7 @@ VAddr VMManager::ClaimGpuMemory(size_t Size, size_t* BytesToSkip)
 		Unlock();
 	}
 
-	RETURN((VAddr)NV2A_PRAMIN_BASE);
+	RETURN((VAddr)CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(m_HighestPage + 1) - *BytesToSkip);
 }
 
 void VMManager::PersistMemory(VAddr addr, size_t Size, bool bPersist)

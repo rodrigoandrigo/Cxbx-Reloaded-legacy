@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -27,7 +27,6 @@
 #pragma once
 
 #include <mutex>
-#include <shared_mutex>
 
 // ReactOS uses a size of 512, but disassembling the kernel reveals it to be 32 instead
 #define TIMER_TABLE_SIZE 32
@@ -240,43 +239,7 @@ namespace xbox
 		IN PKTHREAD Thread,
 		IN long_ptr_xt WaitStatus
 	);
-
-	// Remove all wait blocks from their dispatcher objects' wait lists
-	// and clear Thread->WaitBlockList.  Must be called with KiWaitListLock held.
-	// Does not acquire any locks internally.
-	void_xt KiRemoveWaitBlocks
-	(
-		IN PKTHREAD Thread
-	);
-
-	// Set up the thread's TimerWaitBlock as a single-entry circular list in the
-	// thread timer's WaitListHead, and link it into the wait block chain.
-	// LastWaitBlock->NextWaitBlock is set to point to the TimerWaitBlock, and
-	// TimerWaitBlock->NextWaitBlock is set to FirstWaitBlock (closing the circle).
-	void_xt KiSetupTimerWaitBlock
-	(
-		IN PKTHREAD Thread,
-		IN PKWAIT_BLOCK LastWaitBlock,
-		IN PKWAIT_BLOCK FirstWaitBlock
-	);
-
-	// Cancel the thread's pending timer, if any.  Acquires KiTimerLock internally.
-	// Must NOT be called while holding KiWaitListLock (would invert lock order
-	// with KiTimerExpiration which takes KiTimerLock before KiWaitListLock).
-	void_xt KiCancelThreadTimer
-	(
-		IN PKTHREAD Thread
-	);
 };
-
-// Per-thread host wake event infrastructure.
-// Each Xbox thread gets a Win32 auto-reset event that is signaled by
-// KiUnwaitThread / KiInsertQueueApc to instantly wake the thread from
-// its dispatcher wait instead of relying on SleepEx polling.
-void CxbxRegisterThreadWakeEvent(xbox::PKTHREAD Thread);
-void CxbxUnregisterThreadWakeEvent(xbox::PKTHREAD Thread);
-void* CxbxGetThreadWakeEvent(xbox::PKTHREAD Thread);
-void CxbxSignalThreadWakeEvent(xbox::PKTHREAD Thread);
 
 extern xbox::KPROCESS KiUniqueProcess;
 extern const xbox::ulong_xt CLOCK_TIME_INCREMENT;

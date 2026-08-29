@@ -56,7 +56,6 @@
 #include "OHCI.h"
 #include "core\kernel\exports\EmuKrnl.h"  // For HalSystemInterrupt
 #include "common\util\CxbxUtil.h"
-#include "common/Timer.h"
 #include "Logging.h"
 
 static const char* OHCI_RegNames[] = {
@@ -439,7 +438,7 @@ bool OHCI::OHCI_CopyTDBuffer(OHCI_TD* Td, uint8_t* Buffer, int Length, bool bIsW
 		return false; // no bytes left to copy
 	}
 
-	// From the OHCI standard: "If during the data transfer the buffer address contained in the HCï¿½fs working copy of
+	// From the OHCI standard: "If during the data transfer the buffer address contained in the HCfs working copy of
 	// CurrentBufferPointer crosses a 4K boundary, the upper 20 bits of BufferEnd are copied to the
 	// working value of CurrentBufferPointer causing the next buffer address to be the 0th byte in the
 	// same 4K page that contains the last byte of the buffer."
@@ -1241,18 +1240,18 @@ void OHCI::OHCI_WriteRegister(xbox::addr_xt Addr, uint32_t Value)
 	}
 }
 
-uint64_t OHCI::OHCI_tick(uint64_t now)
+uint64_t OHCI::OHCI_next(uint64_t now)
 {
 	if (m_pEOFtimer) {
-		const int64_t ohci_period = HostQPCFrequency / 1000; // 1ms in QPC ticks
+		constexpr uint64_t ohci_period = 1000;
 		uint64_t next = m_SOFtime + ohci_period;
 
 		if (now >= next) {
 			OHCI_FrameBoundaryWorker();
-			return now + ohci_period;
+			return ohci_period;
 		}
 
-		return next;
+		return m_SOFtime + ohci_period - now; // time remaining until EOF
 	}
 
 	return -1;
@@ -1284,14 +1283,12 @@ uint32_t OHCI::OHCI_GetFrameRemaining()
 	// Being in USB operational state guarantees that m_pEOFtimer and m_SOFtime were set already
 	ticks = get_now() - m_SOFtime;
 
-	// 1ms USB frame time in QPC ticks
-	int64_t frameTimeQPC = HostQPCFrequency / 1000;
-	if (ticks >= (uint64_t)frameTimeQPC) {
+	// Avoid Muldiv64 if possible
+	if (ticks >= m_UsbFrameTime) {
 		return m_Registers.HcFmRemaining & OHCI_FMR_FRT;
 	}
 
-	// Convert elapsed QPC ticks to USB bit ticks (12 MHz)
-	ticks = ticks * USB_HZ / HostQPCFrequency;
+	ticks = Muldiv64(1, (uint32_t)ticks, (uint32_t)m_TicksPerUsbTick);
 	frame = static_cast<uint16_t>((m_Registers.HcFmInterval & OHCI_FMI_FI) - ticks);
 
 	return (m_Registers.HcFmRemaining & OHCI_FMR_FRT) | frame;

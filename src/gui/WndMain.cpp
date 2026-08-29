@@ -400,20 +400,6 @@ LRESULT CALLBACK WndMain::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 						case ID_GUI_STATUS_OVERLAY:
 							g_EmuShared->GetOverlaySettings(&g_Settings->m_overlay);
 							break;
-
-						case ID_GUI_STATUS_EMU_HWND:
-							// The emu process sends its render window HWND (WS_POPUP owned window).
-							m_hwndChild = (HWND)(uintptr_t)lParam;
-							UpdateCaption();
-							RefreshMenus();
-							break;
-
-						case ID_GUI_STATUS_EMU_HWND_DESTROY:
-							if (!m_iIsEmulating) {
-								m_hwndChild = NULL;
-								StopEmulation();
-							}
-							break;
 					}
 				}
 				break;
@@ -616,34 +602,7 @@ LRESULT CALLBACK WndMain::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 			if(!m_bIsStarted) {
 				char DroppedXbeFilename[MAX_PATH];
 				DragQueryFile((HDROP)wParam, 0, DroppedXbeFilename, MAX_PATH);
-
-				DWORD attrs = GetFileAttributesA(DroppedXbeFilename);
-				if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-					// Dropped path is a folder - look for default.xbe first
-					char XbePath[MAX_PATH];
-					sprintf(XbePath, "%s\\default.xbe", DroppedXbeFilename);
-					if (GetFileAttributesA(XbePath) != INVALID_FILE_ATTRIBUTES) {
-						OpenXbe(XbePath);
-					}
-					else {
-						// Search for any .xbe file in the folder
-						char SearchPattern[MAX_PATH];
-						sprintf(SearchPattern, "%s\\*.xbe", DroppedXbeFilename);
-						WIN32_FIND_DATAA findData;
-						HANDLE hFind = FindFirstFileA(SearchPattern, &findData);
-						if (hFind != INVALID_HANDLE_VALUE) {
-							sprintf(XbePath, "%s\\%s", DroppedXbeFilename, findData.cFileName);
-							FindClose(hFind);
-							OpenXbe(XbePath);
-						}
-						else {
-							MessageBoxA(m_hwnd, "No .xbe file found in the dropped folder.", "Cxbx-Reloaded", MB_OK | MB_ICONWARNING);
-						}
-					}
-				}
-				else {
-					OpenXbe(DroppedXbeFilename);
-				}
+				OpenXbe(DroppedXbeFilename);
 			}
 		}
 		break;

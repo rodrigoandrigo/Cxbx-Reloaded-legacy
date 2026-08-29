@@ -89,7 +89,6 @@
 #include "CxbxNV2APixelShaderConstants.hlsli"
 #include "CxbxPGRAPHRegs.hlsli"
 #include "CxbxRegisterCombinerInterpreterState.hlsli"
-#include "CxbxPSAuxFromPGRAPH.hlsli"
 #include "CxbxNV2AMathHelpers.hlsli"
 
 // Shared pure-math pixel shader helpers (ApplyTexFmtFixup, PerformColorSign,
@@ -122,12 +121,6 @@ SamplerState Samp0     : register(s0);
 SamplerState Samp1     : register(s1);
 SamplerState Samp2     : register(s2);
 SamplerState Samp3     : register(s3);
-
-// Stencil SRVs for depth-as-color remapping (X24_TYPELESS_G8_UINT, slots t16-t19)
-Texture2D<uint2> TexStencil_0 : register(t16);
-Texture2D<uint2> TexStencil_1 : register(t17);
-Texture2D<uint2> TexStencil_2 : register(t18);
-Texture2D<uint2> TexStencil_3 : register(t19);
 
 #include "CxbxPixelShaderInput.hlsli"
 
@@ -202,7 +195,7 @@ float4 ApplyInputMapping(uint mapping, float4 v)
 {
     float4 clamped = max(0.0f, v);
     uint   mode    = (mapping >> 6u) & 3u;
-    bool   negate  = (mapping & PS_INPUTMAPPING_NEGATE_BIT) != 0u;
+    bool   negate  = (mapping & 0x20u) != 0u;
 
     float4 mUnsigned =        clamped;          // mode 0: max(0, v)
     float4 mExpand   = 2.0f * clamped - 1.0f;   // mode 1: 2*max(0,v)-1
@@ -225,7 +218,7 @@ float ApplyInputMappingScalar(uint mapping, float v)
 {
     float  clamped = max(0.0f, v);
     uint   mode    = (mapping >> 6u) & 3u;
-    bool   negate  = (mapping & PS_INPUTMAPPING_NEGATE_BIT) != 0u;
+    bool   negate  = (mapping & 0x20u) != 0u;
 
     float mUnsigned =        clamped;
     float mExpand   = 2.0f * clamped - 1.0f;
@@ -263,7 +256,7 @@ float DecodeOutputScale(uint flags)
 {
     // Scale values are powers of 2: m=0→1, m=1→2, m=2→4, m=3→0.5
     // Exponent sequence (0, 1, 2, -1) = ((m + 1) & 3) - 1
-    uint m = (flags >> PS_COMBINEROUTPUT_SCALE_SHIFT) & PS_COMBINEROUTPUT_SCALE_MASK;
+    uint m = (flags >> 4u) & 3u;
     return exp2((float)((m + 1u) & 3u) - 1.0f);
 }
 
@@ -282,8 +275,8 @@ float DecodeOutputScale(uint flags)
 
 float4 ResolveStageInput(float4 Regs[16], uint regByte)
 {
-    uint regIdx    = regByte & PS_REGISTER_MASK;
-    uint mapping   = regByte & PS_INPUTMAPPING_MASK;
+    uint regIdx    = regByte & 0x0Fu;
+    uint mapping   = regByte & 0xE0u;
     bool useAlphaC = (regByte & PS_CHANNEL_ALPHA) != 0u;
 
     float4 val = Regs[regIdx];
@@ -305,16 +298,16 @@ float ResolveStageInputAlpha(float4 Regs[16], uint regByte)
     // index = (bit4 >> 4) selects 0→blue, 1→alpha.  Single dynamic index
     // avoids branch duplication that kills register allocation in the
     // 8× unrolled combiner loop.
-    uint regIdx  = regByte & PS_REGISTER_MASK;
-    uint mapping = regByte & PS_INPUTMAPPING_MASK;
+    uint regIdx  = regByte & 0x0Fu;
+    uint mapping = regByte & 0xE0u;
 
     return ApplyInputMappingScalar(mapping, Regs[regIdx].ba[(regByte >> 4u) & 1u]);
 }
 
 float4 ResolveFinalInput(float4 Regs[16], uint regByte, bool isFinalAB)
 {
-    uint regIdx  = regByte & PS_REGISTER_MASK;
-    uint mapping = regByte & PS_INPUTMAPPING_MASK;
+    uint regIdx  = regByte & 0x0Fu;
+    uint mapping = regByte & 0xE0u;
     float4 val   = Regs[regIdx];
 
     // FOG: rgb → 0, alpha passthrough
@@ -332,9 +325,10 @@ float4 ResolveFinalInput(float4 Regs[16], uint regByte, bool isFinalAB)
         val = val.aaaa;
 
     // Invalid final-combiner mappings (expand/halfbias/signed) collapse to
-    // unsigned_identity or unsigned_invert — only the negate bit is preserved.
-    if (mapping >= PS_INPUTMAPPING_EXPAND_NORMAL)
-        mapping &= PS_INPUTMAPPING_NEGATE_BIT;
+    // unsigned_identity (0x00) or unsigned_invert (0x20) — bit 5 is the parity.
+    // Mappings 0x00/0x20 are already correct; anything ≥ 0x40 → mask to bit 5.
+    if (mapping >= 0x40u)
+        mapping &= 0x20u;
 
     return ApplyInputMapping(mapping, val);
 }
@@ -353,8 +347,8 @@ uint GetSourceStage(uint stage)
 {
     // PSInputTexture = NV_PGRAPH_SHADERCTL (bits 12-27 = input texture config)
     uint shaderCtl = PG_UINT(NV_PGRAPH_SHADERCTL);
-    uint src2 = (shaderCtl >> NV_PGRAPH_SHADERCTL_PST2_SHIFT) & NV_PGRAPH_SHADERCTL_PST2_MASK;
-    uint src3 = (shaderCtl >> NV_PGRAPH_SHADERCTL_PST3_SHIFT) & NV_PGRAPH_SHADERCTL_PST3_MASK;
+    uint src2 = (shaderCtl >> 16u) & 0x1u;
+    uint src3 = (shaderCtl >> 20u) & 0x3u;
     uint src  = (stage == 3u) ? src3 : src2;
     return (stage <= 1u) ? 0u : src;  // stages 0/1 always return 0
 }
@@ -369,7 +363,7 @@ uint GetSourceStage(uint stage)
 
 void ApplyCompareModeForStage(uint stage, float4 coords)
 {
-    uint clipBits = (PG_UINT(NV_PGRAPH_SHADERCLIPMODE) >> (stage * NV_PGRAPH_SHADERCLIPMODE_STAGE_BITS)) & NV_PGRAPH_SHADERCLIPMODE_STAGE_MASK;
+    uint clipBits = (PG_UINT(NV_PGRAPH_SHADERCLIPMODE) >> (stage * 4u)) & 0xFu;
     ApplyCompareMode(clipBits, coords);
 }
 
@@ -385,7 +379,7 @@ float3 ApplyDotMappingForStage(uint stage, float4 src)
 {
     // PSDotMapping = NV_PGRAPH_SHADERCTL bits 0-11; 3 bits per stage (stages 1-3)
     uint shaderCtl = PG_UINT(NV_PGRAPH_SHADERCTL);
-    uint mapping = (shaderCtl >> ((stage - 1u) * NV_PGRAPH_SHADERCTL_DOTMAP_STRIDE)) & NV_PGRAPH_SHADERCTL_DOTMAP_MASK;
+    uint mapping = (shaderCtl >> ((stage - 1u) * 4u)) & 0x7u;
     return ApplyDotMapping(mapping, src);
 }
 
@@ -402,18 +396,12 @@ float4 PostProcessTexel(uint stage, float4 t)
     [branch] if (any(ColorSign[stage] != 0.0f))
         t = PerformColorSign(ColorSign[stage], t);
 
-    // 3. Color key — derived from PGRAPH TEXCTL0 registers
-    {
-        uint ckMode = PG_TEXCTL0(stage) & TEXCTL0_COLORKEYMODE;
-        [branch] if (ckMode != 0u)
-            t = PerformColorKeyOp((int)ckMode, DeriveColorKeyColor(stage), t);
-    }
+    // 3. Color key
+    [branch] if (ColorKeyOp[stage].x != 0.0f)
+        t = PerformColorKeyOp((int)ColorKeyOp[stage].x, ColorKeyColor[stage], t);
 
-    // 4. Alpha kill — derived from PGRAPH TEXCTL0 ALPHAKILLEN bit
-    {
-        int ak = (int)((PG_TEXCTL0(stage) & TEXCTL0_ALPHAKILLEN) ? 1u : 0u);
-        PerformAlphaKill(ak, t);
-    }
+    // 4. Alpha kill
+    PerformAlphaKill((int)AlphaKill[stage], t);
 
     return t;
 }
@@ -468,9 +456,11 @@ float4 SampleCube(uint s, float3 dir)
 
 float4 ApplyShadowCompareForStage(uint stage, float4 sampled, float3 coords)
 {
-    // Per-stage enable — derived from PGRAPH TEXFMT0 COLOR field (depth format check)
-    float4 scVec = DeriveShadowCompare();
-    float sc = scVec[stage];
+    // Per-stage enable from cbuffer
+    float sc = (stage == 0) ? ShadowCompare.x
+             : (stage == 1) ? ShadowCompare.y
+             : (stage == 2) ? ShadowCompare.z
+                            : ShadowCompare.w;
     if (sc == 0.0f) return sampled;
 
     uint shadowFunc = PG_UINT(NV_PGRAPH_SHADOWCTL) & NV_PGRAPH_SHADOWCTL_SHADOW_ZFUNC;
@@ -481,28 +471,7 @@ float4 ApplyShadowCompareForStage(uint stage, float4 sampled, float3 coords)
 // Texture stage fetch
 // ============================================================
 
-// Apply depth-as-color remapping for a source register read from a depth-aliased texture.
-// srcStage: the stage whose texture is aliased as depth.
-// src: the value read from the T register (contains depth SRV .r in .r channel).
-// input: PS_INPUT for screen-space position (stencil Load coordinate).
-float4 RemapDepthSrc(uint srcStage, float4 src, PS_INPUT input)
-{
-    [flatten] if (DepthTexAlias[srcStage] > 0.5f) {
-        if (DepthTexAlias[srcStage] >= 1.5f) {
-            src = RemapD16ToColor(src.r);
-        } else {
-            uint stencil;
-            if (srcStage == 0u) stencil = TexStencil_0.Load(int3((int2)input.iPos.xy, 0)).g;
-            else if (srcStage == 1u) stencil = TexStencil_1.Load(int3((int2)input.iPos.xy, 0)).g;
-            else if (srcStage == 2u) stencil = TexStencil_2.Load(int3((int2)input.iPos.xy, 0)).g;
-            else stencil = TexStencil_3.Load(int3((int2)input.iPos.xy, 0)).g;
-            src = RemapD24S8ToColor(src.r, stencil);
-        }
-    }
-    return src;
-}
-
-void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec, PS_INPUT input)
+void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec)
 {
     // NUM_TEXTURE_STAGES is always a power of 2 (4); bitmask is faster than modulo
     stage &= (NUM_TEXTURE_STAGES - 1u);
@@ -549,13 +518,7 @@ void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec, P
     float4 src      = (float4)0.0f;
 
     if (mode >= PS_TEXTUREMODES_BUMPENVMAP) {   // 0x06+
-        uint srcStage = GetSourceStage(stage) & (NUM_TEXTURE_STAGES - 1u);
-        src = Regs[PS_REGISTER_T0 + srcStage];
-
-        // Depth-as-color remapping: if the source texture is a depth buffer aliased
-        // as color, reconstruct the Xbox ARGB layout from the host depth/stencil SRVs.
-        if (mode >= PS_TEXTUREMODES_DOTPRODUCT)  // 0x08+ (all DOT modes use dot mapping on src)
-            src = RemapDepthSrc(srcStage, src, input);
+        src = Regs[PS_REGISTER_T0 + (GetSourceStage(stage) & (NUM_TEXTURE_STAGES - 1u))];
 
         if (mode >= PS_TEXTUREMODES_DOT_ST) {   // 0x09+
             prevReg1 = Regs[tBase - 1u];
@@ -579,8 +542,10 @@ void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec, P
         // not the mode.  For 2D depth textures (shadow maps), this means
         // sample 2D at (S/Q, T/Q) with R/Q as the shadow compare reference.
         float3 projected = coords.xyz / coords.w;
-        float4 scVec3D = DeriveShadowCompare();
-        float sc = scVec3D[stage];
+        float sc = (stage == 0) ? ShadowCompare.x
+                 : (stage == 1) ? ShadowCompare.y
+                 : (stage == 2) ? ShadowCompare.z
+                                : ShadowCompare.w;
         if (sc != 0.0f) {
             // Depth texture is always 2D — sample as 2D and apply shadow compare
             float4 sampled = Sample2D(stage, projected.xy);
@@ -656,12 +621,7 @@ void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec, P
     {
         float3 dm    = ApplyDotMappingForStage(stage, src);
         float  d     = dot(coords.xyz, dm);
-        // WARNING: Do NOT add an epsilon guard here (e.g. "abs(d) < 1e-5 ? 1.0 : ...").
-        // For D24S8, the VS passes c2 = (0, 0, 1/16777215) so d ≈ 5.96e-8 which is
-        // a perfectly valid denominator. An epsilon guard would force depth to 1.0,
-        // making the z-sprite always render at near-plane and breaking occlusion.
-        // HLSL handles d=0 gracefully: INF is clamped by saturate() in the output.
-        float  depth = prevReg1.x / d;
+        float  depth = (abs(d) < 0.00001f) ? 1.0f : (prevReg1.x / d);
         val = depth.xxxx;
         break;
     }
@@ -673,8 +633,7 @@ void FetchTexture(inout float4 Regs[16], uint stage, uint mode, float3 eyeVec, P
         float3 dm = ApplyDotMappingForStage(stage, src);
         float currentDot = dot(coords.xyz, dm);
         uint nextStage = stage + 1u;
-        uint nextSrcStage = GetSourceStage(nextStage) & (NUM_TEXTURE_STAGES - 1u);
-        float4 nextSrc = RemapDepthSrc(nextSrcStage, Regs[PS_REGISTER_T0 + nextSrcStage], input);
+        float4 nextSrc = Regs[PS_REGISTER_T0 + (GetSourceStage(nextStage) & (NUM_TEXTURE_STAGES - 1u))];
         float4 nextCoords = Regs[PS_REGISTER_T0 + nextStage];
         float3 nextDm = ApplyDotMappingForStage(nextStage, nextSrc);
         float nextDot = dot(nextCoords.xyz, nextDm);
@@ -767,22 +726,22 @@ void DoCombinerStage(inout float4 Regs[16], uint stage,
     bool abBlue2A   = (rgbFlags & PS_COMBINEROUTPUT_AB_BLUE_TO_ALPHA) != 0u;
 
     // Output destination registers (DISCARD == 0 == no-op write)
-    uint rgbRegCD  = (rgbOut >> PS_COMBINEROUTPUTS_CD_SHIFT)      & PS_REGISTER_MASK;
-    uint rgbRegAB  = (rgbOut >> PS_COMBINEROUTPUTS_AB_SHIFT)      & PS_REGISTER_MASK;
-    uint rgbRegSum = (rgbOut >> PS_COMBINEROUTPUTS_MUX_SUM_SHIFT) & PS_REGISTER_MASK;
-    uint aRegCD    = (aOut   >> PS_COMBINEROUTPUTS_CD_SHIFT)      & PS_REGISTER_MASK;
-    uint aRegAB    = (aOut   >> PS_COMBINEROUTPUTS_AB_SHIFT)      & PS_REGISTER_MASK;
-    uint aRegSum   = (aOut   >> PS_COMBINEROUTPUTS_MUX_SUM_SHIFT) & PS_REGISTER_MASK;
+    uint rgbRegCD  = (rgbOut >> PS_COMBINEROUTPUTS_CD_SHIFT)      & 0xFu;
+    uint rgbRegAB  = (rgbOut >> PS_COMBINEROUTPUTS_AB_SHIFT)      & 0xFu;
+    uint rgbRegSum = (rgbOut >> PS_COMBINEROUTPUTS_MUX_SUM_SHIFT) & 0xFu;
+    uint aRegCD    = (aOut   >> PS_COMBINEROUTPUTS_CD_SHIFT)      & 0xFu;
+    uint aRegAB    = (aOut   >> PS_COMBINEROUTPUTS_AB_SHIFT)      & 0xFu;
+    uint aRegSum   = (aOut   >> PS_COMBINEROUTPUTS_MUX_SUM_SHIFT) & 0xFu;
 
     // --- Fetch all eight inputs in one block ---
-    float4 rgbA = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_A_SHIFT) & PS_COMBINERINPUT_MASK);
-    float4 rgbB = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_B_SHIFT) & PS_COMBINERINPUT_MASK);
-    float4 rgbC = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_C_SHIFT) & PS_COMBINERINPUT_MASK);
-    float4 rgbD = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_D_SHIFT) & PS_COMBINERINPUT_MASK);
-    float   aA  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_A_SHIFT) & PS_COMBINERINPUT_MASK);
-    float   aB  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_B_SHIFT) & PS_COMBINERINPUT_MASK);
-    float   aC  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_C_SHIFT) & PS_COMBINERINPUT_MASK);
-    float   aD  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_D_SHIFT) & PS_COMBINERINPUT_MASK);
+    float4 rgbA = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_A_SHIFT) & 0xFFu);
+    float4 rgbB = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_B_SHIFT) & 0xFFu);
+    float4 rgbC = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_C_SHIFT) & 0xFFu);
+    float4 rgbD = ResolveStageInput(Regs, (rgbIn >> PS_COMBINERINPUTS_D_SHIFT) & 0xFFu);
+    float   aA  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_A_SHIFT) & 0xFFu);
+    float   aB  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_B_SHIFT) & 0xFFu);
+    float   aC  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_C_SHIFT) & 0xFFu);
+    float   aD  = ResolveStageInputAlpha(Regs, (aIn   >> PS_COMBINERINPUTS_D_SHIFT) & 0xFFu);
 
     // --- Compute AB and CD products ---
     // Dot product applies to RGB only; alpha always multiplies scalars
@@ -854,55 +813,53 @@ void DoCombinerStage(inout float4 Regs[16], uint stage,
 
 float4 DoFinalCombiner(inout float4 Regs[16])
 {
-    // Derive final combiner inputs from PGRAPH (synthesize default if not set)
-    uint abcd, efg;
-    DeriveFinalCombinerInputs(abcd, efg);
-    [branch] if (abcd == 0u && efg == 0u)
-        return Regs[PS_REGISTER_R0];
+    float4 R0 = Regs[PS_REGISTER_R0];
 
-    // Unpack EFG inputs: PS_COMBINERINPUTS(E, F, G, settings)
-    uint settings = (efg >> PS_COMBINERINPUTS_D_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint eReg     = (efg >> PS_COMBINERINPUTS_A_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint fReg     = (efg >> PS_COMBINERINPUTS_B_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint gReg     = (efg >> PS_COMBINERINPUTS_C_SHIFT) & PS_COMBINERINPUT_MASK;
+    // If both ABCD and EFG are zero the final combiner is unused
+    [branch] if (PSFinalCombinerInputsABCD == 0u && PSFinalCombinerInputsEFG == 0u)
+        return R0;
 
-    // Unpack ABCD inputs (hoisted; compiler can schedule these alongside EFG unpacking).
-    uint aReg = (abcd >> PS_COMBINERINPUTS_A_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint bReg = (abcd >> PS_COMBINERINPUTS_B_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint cReg = (abcd >> PS_COMBINERINPUTS_C_SHIFT) & PS_COMBINERINPUT_MASK;
-    uint dReg = (abcd >> PS_COMBINERINPUTS_D_SHIFT) & PS_COMBINERINPUT_MASK;
+    // PSFinalCombinerInputsEFG = PS_COMBINERINPUTS(E, F, G, settings)
+    //   = (E<<24) | (F<<16) | (G<<8) | settings
+    uint efg      = PSFinalCombinerInputsEFG;
+    // PS_COMBINERINPUTS(E, F, G, settings) for the final combiner
+    uint settings = (efg >> PS_COMBINERINPUTS_D_SHIFT) & 0xFFu;
+    uint eReg     = (efg >> PS_COMBINERINPUTS_A_SHIFT) & 0xFFu;
+    uint fReg     = (efg >> PS_COMBINERINPUTS_B_SHIFT) & 0xFFu;
+    uint gReg     = (efg >> PS_COMBINERINPUTS_C_SHIFT) & 0xFFu;
 
     // Initialise C0/C1 for the final combiner from PGRAPH specular/fog factor regs.
-    // Placed after early exit so unused final combiners skip the writes.
-    Regs[PS_REGISTER_C0] = PG_COLOR_ARGB(NV_PGRAPH_SPECFOGFACTOR0);
-    Regs[PS_REGISTER_C1] = PG_COLOR_ARGB(NV_PGRAPH_SPECFOGFACTOR1);
+    // Placed here (after early exit) so unused final combiners skip the writes.
+    Regs[PS_REGISTER_C0] = PG_COLOR(NV_PGRAPH_SPECFOGFACTOR0);
+    Regs[PS_REGISTER_C1] = PG_COLOR(NV_PGRAPH_SPECFOGFACTOR1);
 
-    // --- EFG phase: resolve E, F (RGB) and G (alpha) ---
+    // --- Resolve E, F (RGB) and G (alpha) — EFG phase (not ABCD) ---
     float3 E = ResolveFinalInput(Regs, eReg, false).rgb;
     float3 F = ResolveFinalInput(Regs, fReg, false).rgb;
     float  G = ResolveFinalInput(Regs, gReg, false).a;
 
-    // Compute E*F; alpha slot is a don't-care but set to 1 for clean register state.
+    // Compute E*F and store in EF_PROD for potential use by ABCD inputs
     Regs[PS_REGISTER_EF_PROD] = float4(E * F, 1.0f);
 
     // --- Optional complement and clamp on V1 and R0 ---
     // These modify the sum inputs, not the stored register values
     float3 v1 = Regs[PS_REGISTER_V1].rgb;
-    float3 r0 = Regs[PS_REGISTER_R0].rgb;
-    if ((settings & PS_FINALCOMBINERSETTING_COMPLEMENT_V1) != 0u) v1 = 1.0f - v1;
-    if ((settings & PS_FINALCOMBINERSETTING_COMPLEMENT_R0) != 0u) r0 = 1.0f - r0;
+    float3 r0 = R0.rgb;
+    if (settings & PS_FINALCOMBINERSETTING_COMPLEMENT_V1) v1 = 1.0f - v1;
+    if (settings & PS_FINALCOMBINERSETTING_COMPLEMENT_R0) r0 = 1.0f - r0;
 
     float3 v1r0sum = v1 + r0;
-    if ((settings & PS_FINALCOMBINERSETTING_CLAMP_SUM) != 0u) v1r0sum = saturate(v1r0sum);
+    if (settings & PS_FINALCOMBINERSETTING_CLAMP_SUM) v1r0sum = saturate(v1r0sum);
 
     // Store V1+R0 sum for potential use by ABCD inputs
     Regs[PS_REGISTER_V1R0_SUM] = float4(v1r0sum, 1.0f);
 
-    // --- ABCD phase: resolve inputs (V1R0_SUM / EF_PROD now valid) ---
-    float4 A = ResolveFinalInput(Regs, aReg, true);
-    float4 B = ResolveFinalInput(Regs, bReg, true);
-    float4 C = ResolveFinalInput(Regs, cReg, true);
-    float4 D = ResolveFinalInput(Regs, dReg, true);
+    // --- Resolve A, B, C, D — ABCD phase (V1R0_SUM / EF_PROD now valid) ---
+    uint abcd = PSFinalCombinerInputsABCD;
+    float4 A = ResolveFinalInput(Regs, (abcd >> PS_COMBINERINPUTS_A_SHIFT) & 0xFFu, true);
+    float4 B = ResolveFinalInput(Regs, (abcd >> PS_COMBINERINPUTS_B_SHIFT) & 0xFFu, true);
+    float4 C = ResolveFinalInput(Regs, (abcd >> PS_COMBINERINPUTS_C_SHIFT) & 0xFFu, true);
+    float4 D = ResolveFinalInput(Regs, (abcd >> PS_COMBINERINPUTS_D_SHIFT) & 0xFFu, true);
 
     // Final RGB = A*B + (1-A)*C + D, clamped to [0,1]
     // Final alpha = G
@@ -916,32 +873,24 @@ float4 DoFinalCombiner(inout float4 Regs[16])
 // Pixel shader entry point
 // ============================================================
 
-// Pixel shader output — includes optional per-pixel depth from DOT_ZW.
-// When DOT_ZW is not active, fragDepth keeps SV_Position.z (rasterized depth).
-struct PS_OUTPUT {
-    float4 color : SV_Target;
-    float  depth : SV_Depth;
-};
-
-PS_OUTPUT main(PS_INPUT input)
+float4 main(PS_INPUT input) : SV_Target
 {
     // --- Decode PSCombinerCount ---
     // PSCombinerCount = PS_COMBINERCOUNT(count, flags) = (flags<<8) | count
     uint rawCombinerCount = PG_UINT(NV_PGRAPH_COMBINECTL);
-    uint numStages    = clamp(rawCombinerCount & PS_COMBINECTL_COUNT_MASK, 1u, 8u);
-    uint ccFlags      = rawCombinerCount >> PS_COMBINECTL_FLAGS_SHIFT;
+    uint numStages    = clamp(rawCombinerCount & 0xFFu, 1u, 8u);
+    uint ccFlags      = rawCombinerCount >> 8u; // extract flags portion
     bool flagMuxMsb   = (ccFlags & PS_COMBINERCOUNT_MUX_MSB)   != 0u;
     bool flagUniqueC0 = (ccFlags & PS_COMBINERCOUNT_UNIQUE_C0) != 0u;
     bool flagUniqueC1 = (ccFlags & PS_COMBINERCOUNT_UNIQUE_C1) != 0u;
 
-    // --- Decode PSTextureModes (derived from PGRAPH SRV) ---
+    // --- Decode PSTextureModes ---
     // Four 5-bit fields packed sequentially; stage N occupies bits[N*5+4 : N*5]
-    uint derivedPSTextureModes = DeriveAdjustedPSTextureModes();
     uint4 texMode = uint4(
-        (derivedPSTextureModes                                        ) & PS_TEXTUREMODES_MASK,
-        (derivedPSTextureModes >>     NV_PGRAPH_SHADERPROG_STAGE_BITS ) & PS_TEXTUREMODES_MASK,
-        (derivedPSTextureModes >> 2 * NV_PGRAPH_SHADERPROG_STAGE_BITS ) & PS_TEXTUREMODES_MASK,
-        (derivedPSTextureModes >> 3 * NV_PGRAPH_SHADERPROG_STAGE_BITS ) & PS_TEXTUREMODES_MASK
+        (PSTextureModes      ) & 0x1Fu,
+        (PSTextureModes >>  5) & 0x1Fu,
+        (PSTextureModes >> 10) & 0x1Fu,
+        (PSTextureModes >> 15) & 0x1Fu
     );
 
     // --- Initialise the register file ---
@@ -969,34 +918,23 @@ PS_OUTPUT main(PS_INPUT input)
     // float4(dot_result, 0, 0, 1), destroying the original .w values.
     float3 eyeVec = float3(input.iT1.w, input.iT2.w, input.iT3.w);
 
-    FetchTexture(Regs, 0u, texMode.x, eyeVec, input);
+    FetchTexture(Regs, 0u, texMode.x, eyeVec);
 #if NUM_TEXTURE_STAGES >= 2
-    FetchTexture(Regs, 1u, texMode.y, eyeVec, input);
+    FetchTexture(Regs, 1u, texMode.y, eyeVec);
 #endif
 #if NUM_TEXTURE_STAGES >= 3
-    FetchTexture(Regs, 2u, texMode.z, eyeVec, input);
+    FetchTexture(Regs, 2u, texMode.z, eyeVec);
 #endif
 #if NUM_TEXTURE_STAGES >= 4
-    FetchTexture(Regs, 3u, texMode.w, eyeVec, input);
+    FetchTexture(Regs, 3u, texMode.w, eyeVec);
 #endif
-
-    // --- DOT_ZW per-pixel depth ---
-    // After texture stages, check if any stage used DOT_ZW (mode 0x0A).
-    // The DOT_ZW result is stored in the T register as depth.xxxx.
-    float fragDepth = input.iPos.z; // default: rasterized depth
-    [flatten] if (texMode.y == PS_TEXTUREMODES_DOT_ZW)
-        fragDepth = Regs[PS_REGISTER_T1].x;
-    [flatten] if (texMode.z == PS_TEXTUREMODES_DOT_ZW)
-        fragDepth = Regs[PS_REGISTER_T2].x;
-    [flatten] if (texMode.w == PS_TEXTUREMODES_DOT_ZW)
-        fragDepth = Regs[PS_REGISTER_T3].x;
 
     // --- Set vertex-derived registers ---
     // Use FRONTFACE_FACTOR to match compiled PS winding-order correction:
     // 0 = always front, +/-1 = two-sided with CW/CCW convention
-    // Derived from PGRAPH CSV0_C + SETUPRASTER
+    // When FrontFaceInfo.x == 0 (no two-sided lighting), always use front face.
     float faceSign = input.iFF ? 1.0f : -1.0f;
-    bool isFront = (faceSign * DeriveFrontFaceFactor()) >= 0.0f;
+    bool isFront = (faceSign * FrontFaceInfo.x) >= 0.0f;
     float4 diffuse  = isFront ? input.iD0 : input.iB0;
     float4 specular = isFront ? input.iD1 : input.iB1;
     Regs[PS_REGISTER_V0] = diffuse;
@@ -1026,8 +964,8 @@ PS_OUTPUT main(PS_INPUT input)
             // stages share constant[0].  Combiner outputs CAN write to C0/C1
             // (confirmed by xemu / NV2A hardware), so this must happen before
             // DoCombinerStage, not inside ResolveStageInput.
-            Regs[PS_REGISTER_C0] = flagUniqueC0 ? PG_COLOR_ARGB(NV_PGRAPH_COMBINEFACTOR0 + stage * 4) : PG_COLOR_ARGB(NV_PGRAPH_COMBINEFACTOR0);
-            Regs[PS_REGISTER_C1] = flagUniqueC1 ? PG_COLOR_ARGB(NV_PGRAPH_COMBINEFACTOR1 + stage * 4) : PG_COLOR_ARGB(NV_PGRAPH_COMBINEFACTOR1);
+            Regs[PS_REGISTER_C0] = flagUniqueC0 ? PG_COLOR(NV_PGRAPH_COMBINEFACTOR0 + stage * 4) : PG_COLOR(NV_PGRAPH_COMBINEFACTOR0);
+            Regs[PS_REGISTER_C1] = flagUniqueC1 ? PG_COLOR(NV_PGRAPH_COMBINEFACTOR1 + stage * 4) : PG_COLOR(NV_PGRAPH_COMBINEFACTOR1);
             DoCombinerStage(Regs, stage, flagMuxMsb);
         }
     }
@@ -1039,19 +977,16 @@ PS_OUTPUT main(PS_INPUT input)
         uint control0 = PG_UINT(NV_PGRAPH_CONTROL_0);
         float alphaEnable = (control0 & NV_PGRAPH_CONTROL_0_ALPHATESTENABLE) ? 1.0f : 0.0f;
         float alphaRef    = float(control0 & NV_PGRAPH_CONTROL_0_ALPHAREF) / 255.0f;
-        float alphaFunc   = float((control0 & NV_PGRAPH_CONTROL_0_ALPHAFUNC) >> NV_PGRAPH_CONTROL_0_ALPHAFUNC_SHIFT);
+        float alphaFunc   = float((control0 & NV_PGRAPH_CONTROL_0_ALPHAFUNC) >> 8);
         PerformAlphaTest(float3(alphaEnable, alphaRef, alphaFunc), result.a);
     }
 
     // --- Fog blending ---
     // iFog is already a computed fog factor from the VS (EXP/EXP2/LINEAR/passthrough).
     // NV2A clamps the interpolated fog factor to [0,1] before blending.
-    [branch] if (DeriveFogEnable() != 0u) {
+    [branch] if (FogEnable != 0u) {
         result.rgb = lerp(PG_COLOR_ARGB(NV_PGRAPH_FOGCOLOR).rgb, result.rgb, saturate(input.iFog));
     }
 
-    PS_OUTPUT psOut;
-    psOut.color = result;
-    psOut.depth = saturate(fragDepth);
-    return psOut;
+    return result;
 }

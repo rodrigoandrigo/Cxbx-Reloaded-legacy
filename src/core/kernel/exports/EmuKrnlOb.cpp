@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -78,20 +78,13 @@ std::recursive_mutex g_ObMtx;
 static xbox::KIRQL ObLock()
 {
 	xbox::KIRQL OldIrql = xbox::KeRaiseIrqlToDpcLevel();
-	// On real hardware, DISPATCH_LEVEL prevents thread switching, making this
-	// lock unnecessary. In Cxbx-Reloaded, KeRaiseIrqlToDpcLevel only sets
-	// KPCR.Irql — Windows still controls scheduling, so we need g_ObMtx for
-	// actual mutual exclusion. The IRQL raise is kept for bookkeeping only
-	// (code that checks KeGetCurrentIrql still sees the expected level).
+	// Raising the irql to dpc level doesn't prevent thread switching, so acquire a lock
 	g_ObMtx.lock();
 	return OldIrql;
 }
 
 static void ObUnlock(xbox::KIRQL OldIrql)
 {
-	// Order doesn't matter for correctness here: since our IRQL changes don't
-	// affect scheduling, neither ordering creates a priority inversion risk.
-	// The mutex alone provides mutual exclusion.
 	xbox::KfLowerIrql(OldIrql);
 	g_ObMtx.unlock();
 }
@@ -119,7 +112,6 @@ xbox::boolean_xt xbox::ObpCreatePermanentDirectoryObject(
 	result = ObReferenceObjectByHandle(Handle, &ObDirectoryObjectType, (PVOID *)DirectoryObject);
 	
 	if (!X_NT_SUCCESS(result)) {
-		NtClose(Handle);
 		RETURN(FALSE);
 	}
 
@@ -1260,6 +1252,14 @@ XBSYSAPI EXPORTNUM(250) xbox::void_xt FASTCALL xbox::ObfDereferenceObject
 )
 {
 	LOG_FUNC_ONE_ARG_OUT(Object);
+
+	// HACK: Since we forward to NtDll::NtCreateEvent, this *might* be a Windows handle instead of our own
+	// In this case, we must do nothing, otherwise we'll crash...
+	// Test Case: Xbox Live Dashboard, Network Test (or any other Xbox Live connection)
+	DWORD flags = 0;
+	if (GetHandleInformation((HANDLE)Object, &flags)) {
+		return;
+	}
 
 	POBJECT_HEADER ObjectHeader = OBJECT_TO_OBJECT_HEADER(Object);
 	

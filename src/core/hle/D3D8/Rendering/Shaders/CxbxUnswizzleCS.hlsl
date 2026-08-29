@@ -3,8 +3,6 @@ ByteAddressBuffer g_SrcBuffer : register(t0);
 RWTexture2D<uint> g_DstTexture : register(u0);
 cbuffer UnswizzleConstants : register(b0) {
     uint maskX; uint maskY; uint texWidth; uint texHeight; uint bpp;
-    uint pad0; uint pad1;
-    uint srcOffset; // byte offset into g_SrcBuffer (0 = staging, nonzero = mirror)
 };
 uint MortonIndex(uint x, uint y) {
     uint mx = maskX; uint my = maskY;
@@ -25,7 +23,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     uint x = dtid.x; uint y = dtid.y;
     if (x >= texWidth || y >= texHeight) return;
     uint mortonIdx = MortonIndex(x, y);
-    uint srcByteOffset = srcOffset + mortonIdx * bpp;
+    uint srcByteOffset = mortonIdx * bpp;
     uint value;
     if (bpp == 4) {
         value = g_SrcBuffer.Load(srcByteOffset);

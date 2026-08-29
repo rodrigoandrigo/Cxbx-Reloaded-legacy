@@ -43,6 +43,16 @@
 #define TARGET_PAGE_MASK ~(TARGET_PAGE_SIZE - 1)
 #define TARGET_PAGE_ALIGN(addr) (((addr) + TARGET_PAGE_SIZE - 1) & TARGET_PAGE_MASK)
 
+// GL constant stubs (kept for NV2A vertex attribute state machine)
+#ifndef GL_UNSIGNED_BYTE
+#define GL_UNSIGNED_BYTE  0x1401
+#define GL_SHORT          0x1402
+#define GL_FLOAT          0x1406
+#define GL_TRUE           1
+#define GL_FALSE          0
+#define GL_BGRA           0x80E1
+#endif
+
 // ---- NV097 method trace infrastructure ----
 // Scans push buffer commands written by Xbox D3D API trampolines.
 // pgraph_trace_begin/end bracket a trampoline call; pgraph_trace_log_pushbuffer
@@ -161,9 +171,15 @@ void pgraph_trace_close()
 }
 // ---- End trace infrastructure ----
 
-#include "nv2a_pgraph_backend.h"
-
-PgraphBackend g_pgraph_backend = {};
+void (*pgraph_draw)(NV2AState *d);
+void (*pgraph_draw_state_update)(NV2AState *d);
+void (*pgraph_draw_clear)(NV2AState *d);
+void (*pgraph_draw_patch)(NV2AState *d);  // Hardware tessellation callback
+void (*pgraph_flip_stall)(NV2AState *d);  // Host present on FLIP_STALL
+void (*pgraph_zpass_begin)(NV2AState *d); // Begin occlusion query for zpass counting
+void (*pgraph_zpass_end)(NV2AState *d);   // End occlusion query, accumulate result
+void (*pgraph_zpass_collect)(NV2AState *d); // Collect pending query result (blocking)
+void (*pgraph_launch_transform_program)(NV2AState *d, unsigned int program_start); // Vertex state shader execution
 
 // Set true the first time the title issues an explicit NV097_FLIP_STALL.
 // Once observed, the puller's auto-present fallback (intended for raw push
@@ -197,7 +213,7 @@ static uint32_t pgraph_rdi_read(PGRAPHState *pg,
     case RDI_INDEX_VTX_CONSTANTS0:
     case RDI_INDEX_VTX_CONSTANTS1:
         assert((address / 4) < NV2A_VERTEXSHADER_CONSTANTS);
-        r = pg->xf.xfctx[address / 4][3 - address % 4];
+        r = pg->vsh_constants[address / 4][3 - address % 4];
         break;
     default:
         fprintf(stderr, "nv2a: unknown rdi read select 0x%x address 0x%x\n",
@@ -217,15 +233,9 @@ static void pgraph_rdi_write(PGRAPHState *pg,
     case RDI_INDEX_VTX_CONSTANTS1:
         assert(false); /* Untested */
         assert((address / 4) < NV2A_VERTEXSHADER_CONSTANTS);
-        {
-            unsigned idx = address / 4;
-			unsigned slot = 3 - address % 4;
-            if (pg->xf.xfctx[idx][slot] != val) {
-                pg->xf.xfctx[idx][slot] = val;
-                pg->xf.xfctx_dirty[idx / 32] |= (1u << (idx % 32));
-                pg->xf.xfctx_generation++;
-            }
-        }
+        pg->vsh_constants_dirty[address / 4] |=
+            (val != pg->vsh_constants[address / 4][3 - address % 4]);
+        pg->vsh_constants[address / 4][3 - address % 4] = val;
         break;
     default:
         NV2A_DPRINTF("unknown rdi write select 0x%x, address 0x%x, val 0x%08x\n",
@@ -281,6 +291,9 @@ DEVICE_WRITE32(PGRAPH)
 
 	switch (addr) {
 	case NV_PGRAPH_INTR:
+		if (value & NV_PGRAPH_INTR_ERROR) {
+			EmuLog(LOG_LEVEL::INFO, "NV_PGRAPH_INTR: ISR clearing INTR_ERROR (pending was 0x%08X)", pg->pending_interrupts);
+		}
 		pg->pending_interrupts &= ~value;
 		qemu_cond_broadcast(&pg->interrupt_cond);
 		break;
@@ -296,15 +309,6 @@ DEVICE_WRITE32(PGRAPH)
 				% GET_MASK(pg->regs[RI(NV_PGRAPH_SURFACE)],
 					NV_PGRAPH_SURFACE_MODULO_3D));
 			qemu_cond_broadcast(&pg->flip_3d);
-
-			// For MMIO-only games (no pushbuffer FLIP_STALL), mark surface dirty
-			// and wake the puller thread so its auto-present fires.  We can't call
-			// g_pgraph_backend.flip_stall directly here because this runs on the DPC/system_events
-			// thread, not the puller thread that owns the D3D11 context.
-			if (!g_pgraph_explicit_flip_stall_seen) {
-				d->pgraph.surface_color.draw_dirty = true;
-				SetEvent(d->pfifo.puller_event);
-			}
 		}
 		break;
     case NV_PGRAPH_RDI_DATA: {
@@ -377,6 +381,7 @@ void pgraph_handle_method(NV2AState *d,
 							unsigned int method,
 							uint32_t parameter)
 {
+	unsigned int i;
 	unsigned int slot;
 
     PGRAPHState *pg = &d->pgraph;
@@ -446,9 +451,6 @@ void pgraph_handle_method(NV2AState *d,
 		case NV062_SET_OBJECT:
 			context_surfaces_2d->object_instance = parameter;
 			break;
-		case NV062_SET_CONTEXT_DMA_NOTIFIES:
-			context_surfaces_2d->dma_notifies = parameter;
-			break;
 		case NV062_SET_CONTEXT_DMA_IMAGE_SOURCE:
 			context_surfaces_2d->dma_image_source = parameter;
 			break;
@@ -501,7 +503,7 @@ void pgraph_handle_method(NV2AState *d,
 			/* I guess this kicks it off? */
 			if (image_blit->operation == NV09F_SET_OPERATION_SRCCOPY) {
 
-				NV2A_DPRINTF_IF(true, "NV09F_SET_OPERATION_SRCCOPY");
+				NV2A_GL_DPRINTF(true, "NV09F_SET_OPERATION_SRCCOPY");
 
 				ContextSurfaces2DState *context_surfaces = context_surfaces_2d;
 				assert(context_surfaces->object_instance
@@ -585,6 +587,8 @@ void pgraph_handle_method(NV2AState *d,
 			if (parameter != 0) {
 				assert(!(pg->pending_interrupts & NV_PGRAPH_INTR_ERROR));
 
+				EmuLog(LOG_LEVEL::INFO, "NV097_NO_OPERATION: param=0x%08X, raising PGRAPH INTR_ERROR (waiting for ISR to clear)", parameter);
+
 				SET_MASK(pg->regs[RI(NV_PGRAPH_TRAPPED_ADDR)],
 					NV_PGRAPH_TRAPPED_ADDR_CHID, channel_id);
 				SET_MASK(pg->regs[RI(NV_PGRAPH_TRAPPED_ADDR)],
@@ -592,7 +596,7 @@ void pgraph_handle_method(NV2AState *d,
 				SET_MASK(pg->regs[RI(NV_PGRAPH_TRAPPED_ADDR)],
 					NV_PGRAPH_TRAPPED_ADDR_MTHD, method);
 				pg->regs[RI(NV_PGRAPH_TRAPPED_DATA_LOW)] = parameter;
-				pg->regs[RI(NV_PGRAPH_NSOURCE)] = NV_PGRAPH_NSOURCE_NOTIFICATION;
+				pg->regs[RI(NV_PGRAPH_NSOURCE)] = NV_PGRAPH_NSOURCE_NOTIFICATION; /* TODO: check this */
 				pg->pending_interrupts |= NV_PGRAPH_INTR_ERROR;
 
 				qemu_mutex_unlock(&pg->pgraph_lock);
@@ -601,28 +605,10 @@ void pgraph_handle_method(NV2AState *d,
 				qemu_mutex_lock(&pg->pgraph_lock);
 				qemu_mutex_unlock_iothread();
 
-				int localTimeouts = 0;
 				while (pg->pending_interrupts & NV_PGRAPH_INTR_ERROR) {
-					// Use timed wait as a safety net: if the DPC signal was lost
-					// (due to any unforeseen race), we re-signal after 50ms rather
-					// than hanging indefinitely. Normal path returns in <1ms.
-					if (qemu_cond_timedwait(&pg->interrupt_cond, &pg->pgraph_lock, 50)) {
-						localTimeouts++;
-						// After 6 timeouts (300ms), the ISR has had ample opportunity
-						// to ack but hasn't — likely because the game deregistered its
-						// callback handler for this specific TRAPPED_DATA value.
-						// Force-ack to unblock the puller. The callback won't fire
-						// (it wasn't going to anyway), but the command stream continues.
-						if (localTimeouts >= 6) {
-							pg->pending_interrupts &= ~NV_PGRAPH_INTR_ERROR;
-							break;
-						}
-						// Re-signal DPC thread in case the original signal was lost
-						qemu_mutex_unlock(&pg->pgraph_lock);
-						update_irq(d);
-						qemu_mutex_lock(&pg->pgraph_lock);
-					}
+					qemu_cond_wait(&pg->interrupt_cond, &pg->pgraph_lock);
 				}
+				EmuLog(LOG_LEVEL::INFO, "NV097_NO_OPERATION: ISR cleared PGRAPH INTR_ERROR, continuing");
 			}
 			break;
 
@@ -640,66 +626,53 @@ void pgraph_handle_method(NV2AState *d,
 					NV_PGRAPH_SURFACE_WRITE_3D) + 1)
 				% GET_MASK(pg->regs[RI(NV_PGRAPH_SURFACE)],
 					NV_PGRAPH_SURFACE_MODULO_3D));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SURFACE]++;
+			pg->regs_generation++;
 			NV2A_DPRINTF("%d\n",
 				GET_MASK(pg->regs[RI(NV_PGRAPH_SURFACE)],
 					NV_PGRAPH_SURFACE_WRITE_3D));
 
 			break;
 		}
-		case NV097_FLIP_STALL: {
+		case NV097_FLIP_STALL:
 			// Title is using explicit flips — disable puller auto-present fallback.
 			g_pgraph_explicit_flip_stall_seen = true;
 
-			// Trigger host present via the flip_stall plugin callback.
-			if (g_pgraph_backend.flip_stall != nullptr) {
+			// Trigger host present via the flip_stall plugin callback
+			if (pgraph_flip_stall != nullptr) {
 				// Clear draw_dirty so the auto-present in the puller loop
 				// doesn't fire again after this explicit FLIP_STALL present.
 				d->pgraph.surface_color.draw_dirty = false;
-				extern bool g_PullerFlipStallThisCycle;
-				g_PullerFlipStallThisCycle = true;
-				qemu_mutex_unlock(&d->pgraph.pgraph_lock);
-				g_pgraph_backend.flip_stall(d);
-				qemu_mutex_lock(&d->pgraph.pgraph_lock);
+				pgraph_flip_stall(d);
 			}
 
-			// VBlank-gated frame pacing: wait until the next VBlank deadline.
-			// SleepPrecise uses adaptive yielding (SwitchToThread with EMA tracking)
-			// which donates CPU time to other threads while waiting, then does a
-			// final spin for sub-yield precision.
-			// Local anchor prevents drift without conflicting with the VBlank
-			// interrupt's writes to vblank_last_qpc.
+			// VBlank-gated frame pacing: wait until the next VBlank fires.
+			// This caps the emulation to the display refresh rate (~60Hz NTSC,
+			// ~50Hz PAL) and produces even frame spacing, eliminating stutter.
+			// We release pgraph_lock during the sleep so other threads (pusher,
+			// system_events) can proceed.  The puller reacquires it when we return.
 			{
-				static int64_t s_flipStallAnchor = 0;
 				unsigned int totalLines = pcrtc_get_total_lines(d);
 				unsigned int refreshRate = pcrtc_get_refresh_rate(d, totalLines);
-				int64_t vblankPeriodTicks = HostQPCFrequency / refreshRate;
-
-				// Seed anchor from the real VBlank timestamp on first call,
-				// or reseed if it's fallen too far behind (e.g. after a stall).
-				// SleepPrecise handles the "already behind" case internally
-				// (returns current QPC immediately), so no pre-check needed.
+				// Compute microseconds until next VBlank from the last VBlank timestamp
+				LARGE_INTEGER freq, now;
+				QueryPerformanceFrequency(&freq);
+				QueryPerformanceCounter(&now);
 				int64_t lastVBlank = d->vblank_last_qpc.load(std::memory_order_acquire);
-				if (s_flipStallAnchor == 0) {
-					LARGE_INTEGER now;
-					QueryPerformanceCounter(&now);
-					if (now.QuadPart - lastVBlank > vblankPeriodTicks * 2) {
-						s_flipStallAnchor = lastVBlank;
+				if (lastVBlank > 0) {
+					int64_t vblankPeriodTicks = freq.QuadPart / refreshRate;
+					int64_t nextVBlankQPC = lastVBlank + vblankPeriodTicks;
+					if (now.QuadPart < nextVBlankQPC) {
+						int64_t waitUS = (nextVBlankQPC - now.QuadPart) * 1000000 / freq.QuadPart;
+						auto target = std::chrono::steady_clock::now() + std::chrono::microseconds(waitUS);
+						qemu_mutex_unlock(&d->pgraph.pgraph_lock);
+						SleepPrecise(target);
+						qemu_mutex_lock(&d->pgraph.pgraph_lock);
 					}
-				}
-
-				if (s_flipStallAnchor > 0) {
-					int64_t nextVBlankQPC = s_flipStallAnchor + vblankPeriodTicks;
-					qemu_mutex_unlock(&d->pgraph.pgraph_lock);
-					s_flipStallAnchor = SleepPrecise(nextVBlankQPC);
-					qemu_mutex_lock(&d->pgraph.pgraph_lock);
 				}
 			}
 
 			NV2A_DPRINTF("flip stall done\n");
 			break;
-		}
 
 		case NV097_SET_CONTEXT_DMA_SEMAPHORE:
 			pg->dma_semaphore = parameter;
@@ -730,8 +703,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_0)],
 				NV_PGRAPH_CONTROL_0_CSCONVERT,
 				color_space_convert);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_DEPTH_STENCIL]++;
+			pg->regs_generation++;
 			break;
 		}
 
@@ -757,8 +729,7 @@ void pgraph_handle_method(NV2AState *d,
 			}
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_3)], NV_PGRAPH_CONTROL_3_FOG_MODE,
 				mode);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 		case NV097_SET_FOG_GEN_MODE: {
@@ -779,8 +750,7 @@ void pgraph_handle_method(NV2AState *d,
 				break;
 			}
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_D)], NV_PGRAPH_CSV0_D_FOGGENMODE, mode);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 		case NV097_SET_FOG_COLOR: {
@@ -793,7 +763,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_FOGCOLOR)], NV_PGRAPH_FOGCOLOR_RED, red);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_FOGCOLOR)], NV_PGRAPH_FOGCOLOR_GREEN, green);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_FOGCOLOR)], NV_PGRAPH_FOGCOLOR_BLUE, blue);
-			pg->dirty[NV2A_DIRTY_BLEND]++; // table already bumped dirty[NV2A_DIRTY_PGRAPH]
+			pg->regs_generation++; // table wrote raw param; switch rewrote with channel reorder
 			break;
 		}
 		case NV097_SET_BLEND_FUNC_SFACTOR: {
@@ -835,8 +805,7 @@ void pgraph_handle_method(NV2AState *d,
 				break;
 			}
 			SET_MASK(pg->regs[RI(NV_PGRAPH_BLEND)], NV_PGRAPH_BLEND_SFACTOR, factor);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 
@@ -879,8 +848,7 @@ void pgraph_handle_method(NV2AState *d,
 				break;
 			}
 			SET_MASK(pg->regs[RI(NV_PGRAPH_BLEND)], NV_PGRAPH_BLEND_DFACTOR, factor);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 
@@ -906,8 +874,7 @@ void pgraph_handle_method(NV2AState *d,
 				break;
 			}
 			SET_MASK(pg->regs[RI(NV_PGRAPH_BLEND)], NV_PGRAPH_BLEND_EQN, equation);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 
@@ -928,8 +895,7 @@ void pgraph_handle_method(NV2AState *d,
 				NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE, green);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_0)],
 				NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE, blue);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_BLEND]++;
+			pg->regs_generation++;
 			break;
 		}
 		case NV097_SET_DEPTH_MASK:
@@ -940,37 +906,32 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_2)],
 				NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL,
 				kelvin_map_stencil_op(parameter));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_DEPTH_STENCIL]++;
+			pg->regs_generation++;
 			break;
 		case NV097_SET_STENCIL_OP_ZFAIL:
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_2)],
 				NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL,
 				kelvin_map_stencil_op(parameter));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_DEPTH_STENCIL]++;
+			pg->regs_generation++;
 			break;
 		case NV097_SET_STENCIL_OP_ZPASS:
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_2)],
 				NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS,
 				kelvin_map_stencil_op(parameter));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_DEPTH_STENCIL]++;
+			pg->regs_generation++;
 			break;
 
 		case NV097_SET_FRONT_POLYGON_MODE:
 			SET_MASK(pg->regs[RI(NV_PGRAPH_SETUPRASTER)],
 				NV_PGRAPH_SETUPRASTER_FRONTFACEMODE,
 				kelvin_map_polygon_mode(parameter));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 		case NV097_SET_BACK_POLYGON_MODE:
 			SET_MASK(pg->regs[RI(NV_PGRAPH_SETUPRASTER)],
 				NV_PGRAPH_SETUPRASTER_BACKFACEMODE,
 				kelvin_map_polygon_mode(parameter));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 		case NV097_SET_CULL_FACE: {
 			unsigned int face;
@@ -988,8 +949,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_SETUPRASTER)],
 				NV_PGRAPH_SETUPRASTER_CULLCTRL,
 				face);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 		}
 		case NV097_SET_FRONT_FACE: {
@@ -1007,8 +967,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_SETUPRASTER)],
 				NV_PGRAPH_SETUPRASTER_FRONTFACE,
 				ccw ? 1 : 0);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 		}
 		CASE_4(NV097_SET_TEXGEN_S, 16) : {
@@ -1018,8 +977,7 @@ void pgraph_handle_method(NV2AState *d,
 			unsigned int mask = (slot % 2) ? NV_PGRAPH_CSV1_A_T1_S
 				: NV_PGRAPH_CSV1_A_T0_S;
 			SET_MASK(pg->regs[RI(reg)], mask, kelvin_map_texgen(parameter, 0));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_TEXTURE]++;
+			pg->regs_generation++;
 			break;
 		}
 		CASE_4(NV097_SET_TEXGEN_T, 16) : {
@@ -1029,8 +987,7 @@ void pgraph_handle_method(NV2AState *d,
 			unsigned int mask = (slot % 2) ? NV_PGRAPH_CSV1_A_T1_T
 				: NV_PGRAPH_CSV1_A_T0_T;
 			SET_MASK(pg->regs[RI(reg)], mask, kelvin_map_texgen(parameter, 1));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_TEXTURE]++;
+			pg->regs_generation++;
 			break;
 		}
 		CASE_4(NV097_SET_TEXGEN_R, 16) : {
@@ -1040,8 +997,7 @@ void pgraph_handle_method(NV2AState *d,
 			unsigned int mask = (slot % 2) ? NV_PGRAPH_CSV1_A_T1_R
 				: NV_PGRAPH_CSV1_A_T0_R;
 			SET_MASK(pg->regs[RI(reg)], mask, kelvin_map_texgen(parameter, 2));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_TEXTURE]++;
+			pg->regs_generation++;
 			break;
 		}
 		CASE_4(NV097_SET_TEXGEN_Q, 16) : {
@@ -1051,27 +1007,187 @@ void pgraph_handle_method(NV2AState *d,
 			unsigned int mask = (slot % 2) ? NV_PGRAPH_CSV1_A_T1_Q
 				: NV_PGRAPH_CSV1_A_T0_Q;
 			SET_MASK(pg->regs[RI(reg)], mask, kelvin_map_texgen(parameter, 3));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_TEXTURE]++;
+			pg->regs_generation++;
 			break;
 		}
 
-		// NV097_SET_PROJECTION_MATRIX, MODEL_VIEW_MATRIX, INVERSE_MODEL_VIEW_MATRIX,
-		// COMPOSITE_MATRIX, TEXTURE_MATRIX, TEXGEN_PLANE_S/T/R/Q, FOG_PLANE,
-		// VIEWPORT_OFFSET, EYE_POSITION, VIEWPORT_SCALE → xfctx via dispatch table.
-		// SCENE_AMBIENT_COLOR, BACK_SCENE_AMBIENT_COLOR, MATERIAL_EMISSION/ALPHA,
-		// BACK_MATERIAL_EMISSION/ALPHA, EYE_DIRECTION → ltctxa via dispatch table.
-		// SPECULAR_PARAMS, BACK_SPECULAR_PARAMS → ltc1 via dispatch table.
-		// TRANSFORM_PROGRAM, TRANSFORM_CONSTANT → indirect SRAM via dispatch table.
+		CASE_16(NV097_SET_PROJECTION_MATRIX, 4) : {
+			slot = (method - NV097_SET_PROJECTION_MATRIX) / 4;
+			// pg->projection_matrix[slot] = *(float*)&parameter;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_PMAT0 + slot / 4;
+			pg->vsh_constants[row][slot % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
 
-		// FOG_PARAMS dual-writes: ltctxa[FOG_K] via dispatch table,
-		// regs[FOGPARAM0..2] via this switch (read by HostRender + HostSync for shader fog)
+		CASE_64(NV097_SET_MODEL_VIEW_MATRIX, 4) : {
+			slot = (method - NV097_SET_MODEL_VIEW_MATRIX) / 4;
+			unsigned int matnum = slot / 16;
+			unsigned int entry = slot % 16;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_MMAT0 + matnum * 8 + entry / 4;
+			pg->vsh_constants[row][entry % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
+
+		CASE_64(NV097_SET_INVERSE_MODEL_VIEW_MATRIX, 4) : {
+			slot = (method - NV097_SET_INVERSE_MODEL_VIEW_MATRIX) / 4;
+			unsigned int matnum = slot / 16;
+			unsigned int entry = slot % 16;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_IMMAT0 + matnum * 8 + entry / 4;
+			pg->vsh_constants[row][entry % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
+
+		CASE_16(NV097_SET_COMPOSITE_MATRIX, 4) : {
+			slot = (method - NV097_SET_COMPOSITE_MATRIX) / 4;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_CMAT0 + slot / 4;
+			pg->vsh_constants[row][slot % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
+
+		CASE_64(NV097_SET_TEXTURE_MATRIX, 4) : {
+			slot = (method - NV097_SET_TEXTURE_MATRIX) / 4;
+			unsigned int tex = slot / 16;
+			unsigned int entry = slot % 16;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_T0MAT + tex * 8 + entry / 4;
+			pg->vsh_constants[row][entry % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
+
 		CASE_3(NV097_SET_FOG_PARAMS, 4) :
 			slot = (method - NV097_SET_FOG_PARAMS) / 4;
-			pg->regs[RI(NV_PGRAPH_FOGPARAM0) + slot] = parameter;
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			/* Cxbx note: slot = 2 is right after slot = 1 */
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_FOG_K][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_FOG_K] = true;
 			break;
+
+		/* Handles NV097_SET_TEXGEN_PLANE_S,T,R,Q */
+		CASE_64(NV097_SET_TEXGEN_PLANE_S, 4) : {
+			slot = (method - NV097_SET_TEXGEN_PLANE_S) / 4;
+			unsigned int tex = slot / 16;
+			unsigned int entry = slot % 16;
+			unsigned int row = NV_IGRAPH_XF_XFCTX_TG0MAT + tex * 8 + entry / 4;
+			pg->vsh_constants[row][entry % 4] = parameter;
+			pg->vsh_constants_dirty[row] = true;
+			break;
+		}
+
+		CASE_4(NV097_SET_FOG_PLANE, 4):
+			slot = (method - NV097_SET_FOG_PLANE) / 4;
+			pg->vsh_constants[NV_IGRAPH_XF_XFCTX_FOG][slot] = parameter;
+			pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_FOG] = true;
+			break;
+
+		CASE_3(NV097_SET_SCENE_AMBIENT_COLOR, 4):
+			slot = (method - NV097_SET_SCENE_AMBIENT_COLOR) / 4;
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_FR_AMB][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_FR_AMB] = true;
+			break;
+
+		CASE_3(NV097_SET_BACK_SCENE_AMBIENT_COLOR, 4):
+			slot = (method - NV097_SET_BACK_SCENE_AMBIENT_COLOR) / 4;
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_BR_AMB][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_BR_AMB] = true;
+			break;
+
+		CASE_3(NV097_SET_MATERIAL_EMISSION, 4):
+			slot = (method - NV097_SET_MATERIAL_EMISSION) / 4;
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_CM_COL][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_CM_COL] = true;
+			break;
+
+		case NV097_SET_MATERIAL_ALPHA:
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_CM_COL][3] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_CM_COL] = true;
+			break;
+
+		CASE_3(NV097_SET_BACK_MATERIAL_EMISSIONR, 4):
+			slot = (method - NV097_SET_BACK_MATERIAL_EMISSIONR) / 4;
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_BCM_COL][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_BCM_COL] = true;
+			break;
+
+		case NV097_SET_BACK_MATERIAL_ALPHA:
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_BCM_COL][3] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_BCM_COL] = true;
+			break;
+
+		CASE_6(NV097_SET_SPECULAR_PARAMS, 4): {
+			slot = (method - NV097_SET_SPECULAR_PARAMS) / 4;
+			unsigned int row = NV_IGRAPH_XF_LTC1_l0 + slot / 4;
+			pg->ltc1[row][slot % 4] = parameter;
+			pg->ltc1_dirty[row] = true;
+			break;
+		}
+
+		CASE_6(NV097_SET_BACK_SPECULAR_PARAMS, 4): {
+			slot = (method - NV097_SET_BACK_SPECULAR_PARAMS) / 4;
+			unsigned int row = NV_IGRAPH_XF_LTC1_Bl0 + slot / 4;
+			pg->ltc1[row][slot % 4] = parameter;
+			pg->ltc1_dirty[row] = true;
+			break;
+		}
+
+		CASE_4(NV097_SET_VIEWPORT_OFFSET, 4):
+			slot = (method - NV097_SET_VIEWPORT_OFFSET) / 4;
+			pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPOFF][slot] = parameter;
+			pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_VPOFF] = true;
+			break;
+
+		CASE_4(NV097_SET_EYE_POSITION, 4):
+			slot = (method - NV097_SET_EYE_POSITION) / 4;
+			pg->vsh_constants[NV_IGRAPH_XF_XFCTX_EYEP][slot] = parameter;
+			pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_EYEP] = true;
+			break;
+
+		CASE_4(NV097_SET_VIEWPORT_SCALE, 4):
+			slot = (method - NV097_SET_VIEWPORT_SCALE) / 4;
+			pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPSCL][slot] = parameter;
+			pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_VPSCL] = true;
+			break;
+
+		CASE_32(NV097_SET_TRANSFORM_PROGRAM, 4) : {
+
+			slot = (method - NV097_SET_TRANSFORM_PROGRAM) / 4;
+
+			int program_load = GET_MASK(pg->regs[RI(NV_PGRAPH_CHEOPS_OFFSET)],
+				NV_PGRAPH_CHEOPS_OFFSET_PROG_LD_PTR);
+
+			assert(program_load < NV2A_MAX_TRANSFORM_PROGRAM_LENGTH);
+			pg->program_data[program_load][slot % 4] = parameter;
+			pg->program_data_dirty = true;
+
+			if (slot % 4 == 3) {
+				SET_MASK(pg->regs[RI(NV_PGRAPH_CHEOPS_OFFSET)],
+					NV_PGRAPH_CHEOPS_OFFSET_PROG_LD_PTR, program_load + 1);
+			}
+
+			break;
+		}
+
+		CASE_32(NV097_SET_TRANSFORM_CONSTANT, 4): {
+
+			slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
+
+			int const_load = GET_MASK(pg->regs[RI(NV_PGRAPH_CHEOPS_OFFSET)],
+									  NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR);
+
+			assert(const_load < NV2A_VERTEXSHADER_CONSTANTS);
+			// VertexShaderConstant *vsh_constant = &pg->vsh_constants[const_load];
+			pg->vsh_constants_dirty[const_load] |=
+				(parameter != pg->vsh_constants[const_load][slot%4]);
+			pg->vsh_constants[const_load][slot%4] = parameter;
+
+			if (slot % 4 == 3) {
+				SET_MASK(pg->regs[RI(NV_PGRAPH_CHEOPS_OFFSET)],
+						 NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR, const_load+1);
+			}
+			break;
+		}
 
 		CASE_3(NV097_SET_VERTEX3F, 4) : {
 			slot = (method - NV097_SET_VERTEX3F) / 4;
@@ -1086,12 +1202,92 @@ void pgraph_handle_method(NV2AState *d,
 			break;
 		}
 
-		// NV097_SET_BACK_LIGHT_{AMBIENT,DIFFUSE,SPECULAR}_COLOR → ltctxb via dispatch table.
-		// NV097_SET_LIGHT_{AMBIENT,DIFFUSE,SPECULAR}_COLOR → ltctxb via dispatch table.
-		// NV097_SET_LIGHT_LOCAL_RANGE → ltc1 via dispatch table.
-		// NV097_SET_LIGHT_SPOT_FALLOFF, SPOT_DIRECTION → ltctxa via dispatch table.
-		// NV097_SET_LIGHT_INFINITE_HALF_VECTOR, INFINITE_DIRECTION,
-		// LOCAL_POSITION, LOCAL_ATTENUATION → light geometry via dispatch table.
+		/* Handles NV097_SET_BACK_LIGHT_* */
+		CASE_128(NV097_SET_BACK_LIGHT_AMBIENT_COLOR, 4): {
+			slot = (method - NV097_SET_BACK_LIGHT_AMBIENT_COLOR) / 4;
+			unsigned int part = NV097_SET_BACK_LIGHT_AMBIENT_COLOR / 4 + slot % 16;
+			slot /= 16; /* [Light index] */
+			assert(slot < 8);
+			switch(part * 4) {
+			CASE_3(NV097_SET_BACK_LIGHT_AMBIENT_COLOR, 4):
+				part -= NV097_SET_BACK_LIGHT_AMBIENT_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_BAMB + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_BAMB + slot*6] = true;
+				break;
+			CASE_3(NV097_SET_BACK_LIGHT_DIFFUSE_COLOR, 4):
+				part -= NV097_SET_BACK_LIGHT_DIFFUSE_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_BDIF + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_BDIF + slot*6] = true;
+				break;
+			CASE_3(NV097_SET_BACK_LIGHT_SPECULAR_COLOR, 4):
+				part -= NV097_SET_BACK_LIGHT_SPECULAR_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_BSPC + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_BSPC + slot*6] = true;
+				break;
+			default:
+				assert(false);
+				break;
+			}
+			break;
+		}
+		/* Handles all the light source props except for NV097_SET_BACK_LIGHT_* */
+		CASE_256(NV097_SET_LIGHT_AMBIENT_COLOR, 4): {
+			slot = (method - NV097_SET_LIGHT_AMBIENT_COLOR) / 4;
+			unsigned int part = NV097_SET_LIGHT_AMBIENT_COLOR / 4 + slot % 32;
+			slot /= 32; /* [Light index] */
+			assert(slot < 8);
+			switch(part * 4) {
+			CASE_3(NV097_SET_LIGHT_AMBIENT_COLOR, 4):
+				part -= NV097_SET_LIGHT_AMBIENT_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_AMB + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_AMB + slot*6] = true;
+				break;
+			CASE_3(NV097_SET_LIGHT_DIFFUSE_COLOR, 4):
+				part -= NV097_SET_LIGHT_DIFFUSE_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_DIF + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_DIF + slot*6] = true;
+				break;
+			CASE_3(NV097_SET_LIGHT_SPECULAR_COLOR, 4):
+				part -= NV097_SET_LIGHT_SPECULAR_COLOR / 4;
+				pg->ltctxb[NV_IGRAPH_XF_LTCTXB_L0_SPC + slot*6][part] = parameter;
+				pg->ltctxb_dirty[NV_IGRAPH_XF_LTCTXB_L0_SPC + slot*6] = true;
+				break;
+			case NV097_SET_LIGHT_LOCAL_RANGE:
+				pg->ltc1[NV_IGRAPH_XF_LTC1_r0 + slot][0] = parameter;
+				pg->ltc1_dirty[NV_IGRAPH_XF_LTC1_r0 + slot] = true;
+				break;
+			CASE_3(NV097_SET_LIGHT_INFINITE_HALF_VECTOR, 4):
+				part -= NV097_SET_LIGHT_INFINITE_HALF_VECTOR / 4;
+				pg->light_infinite_half_vector[slot][part] = *(float*)&parameter;
+				break;
+			CASE_3(NV097_SET_LIGHT_INFINITE_DIRECTION, 4):
+				part -= NV097_SET_LIGHT_INFINITE_DIRECTION / 4;
+				pg->light_infinite_direction[slot][part] = *(float*)&parameter;
+				break;
+			CASE_3(NV097_SET_LIGHT_SPOT_FALLOFF, 4):
+				part -= NV097_SET_LIGHT_SPOT_FALLOFF / 4;
+				pg->ltctxa[NV_IGRAPH_XF_LTCTXA_L0_K + slot*2][part] = parameter;
+				pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_L0_K + slot*2] = true;
+				break;
+			CASE_4(NV097_SET_LIGHT_SPOT_DIRECTION, 4):
+				part -= NV097_SET_LIGHT_SPOT_DIRECTION / 4;
+				pg->ltctxa[NV_IGRAPH_XF_LTCTXA_L0_SPT + slot*2][part] = parameter;
+				pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_L0_SPT + slot*2] = true;
+				break;
+			CASE_3(NV097_SET_LIGHT_LOCAL_POSITION, 4):
+				part -= NV097_SET_LIGHT_LOCAL_POSITION / 4;
+				pg->light_local_position[slot][part] = *(float*)&parameter;
+				break;
+			CASE_3(NV097_SET_LIGHT_LOCAL_ATTENUATION, 4):
+				part -= NV097_SET_LIGHT_LOCAL_ATTENUATION / 4;
+				pg->light_local_attenuation[slot][part] = *(float*)&parameter;
+				break;
+			default:
+				assert(false);
+				break;
+			}
+			break;
+		}
 
 		CASE_4(NV097_SET_VERTEX4F, 4): {
 			slot = (method - NV097_SET_VERTEX4F) / 4;
@@ -1226,8 +1422,7 @@ void pgraph_handle_method(NV2AState *d,
 			pg->regs[RI(NV_PGRAPH_SETUPRASTER)] =
 				(pg->regs[RI(NV_PGRAPH_SETUPRASTER)] & ~(1 << 30))
 				| ((parameter ? 1 : 0) << 30);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 
 		case NV097_SET_LINE_WIDTH:
@@ -1258,31 +1453,64 @@ void pgraph_handle_method(NV2AState *d,
 				vertex_attribute->count,
 				vertex_attribute->stride);
 
+			vertex_attribute->gl_count = vertex_attribute->count;
+
 			switch (vertex_attribute->format) {
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_D3D:
+				vertex_attribute->gl_type = GL_UNSIGNED_BYTE;
+				vertex_attribute->gl_normalize = GL_TRUE;
 				vertex_attribute->size = 1;
 				assert(vertex_attribute->count == 4);
+				// https://www.opengl.org/registry/specs/ARB/vertex_array_bgra.txt
+				vertex_attribute->gl_count = GL_BGRA;
+				vertex_attribute->needs_conversion = false;
 				break;
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL:
+				vertex_attribute->gl_type = GL_UNSIGNED_BYTE;
+				vertex_attribute->gl_normalize = GL_TRUE;
 				vertex_attribute->size = 1;
+				vertex_attribute->needs_conversion = false;
 				break;
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_S1:
+				vertex_attribute->gl_type = GL_SHORT;
+				vertex_attribute->gl_normalize = GL_TRUE;
 				vertex_attribute->size = 2;
+				vertex_attribute->needs_conversion = false;
 				break;
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F:
+				vertex_attribute->gl_type = GL_FLOAT;
+				vertex_attribute->gl_normalize = GL_FALSE;
 				vertex_attribute->size = 4;
+				vertex_attribute->needs_conversion = false;
 				break;
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_S32K:
+				vertex_attribute->gl_type = GL_SHORT;
+				vertex_attribute->gl_normalize = GL_FALSE;
 				vertex_attribute->size = 2;
+				vertex_attribute->needs_conversion = false;
 				break;
 			case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_CMP:
 				/* 3 signed, normalized components packed in 32-bits. (11,11,10) */
 				vertex_attribute->size = 4;
+				vertex_attribute->gl_type = GL_FLOAT;
+				vertex_attribute->gl_normalize = GL_FALSE;
+				vertex_attribute->needs_conversion = true;
+				vertex_attribute->converted_size = sizeof(float);
+				vertex_attribute->converted_count = 3 * vertex_attribute->count;
 				break;
 			default:
 				fprintf(stderr, "Unknown vertex type: 0x%x\n", vertex_attribute->format);
 				assert(false);
 				break;
+			}
+
+			if (vertex_attribute->needs_conversion) {
+				vertex_attribute->converted_elements = 0;
+			} else {
+				if (vertex_attribute->converted_buffer) {
+					g_free(vertex_attribute->converted_buffer);
+					vertex_attribute->converted_buffer = NULL;
+				}
 			}
 
 			break;
@@ -1297,6 +1525,7 @@ void pgraph_handle_method(NV2AState *d,
 			pg->vertex_attributes[slot].offset =
 				parameter & 0x7fffffff;
 
+			pg->vertex_attributes[slot].converted_elements = 0;
 			pg->vertex_attributes_generation++;
 
 			break;
@@ -1318,8 +1547,8 @@ void pgraph_handle_method(NV2AState *d,
 			 *        approaches could be better
 			 */
 			// Collect any pending occlusion query result before reading
-			if (g_pgraph_backend.zpass_collect != nullptr)
-				g_pgraph_backend.zpass_collect(d);
+			if (pgraph_zpass_collect != nullptr)
+				pgraph_zpass_collect(d);
 
 			uint8_t type = GET_MASK(parameter, NV097_GET_REPORT_TYPE);
 			assert(type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT);
@@ -1341,6 +1570,12 @@ void pgraph_handle_method(NV2AState *d,
 			break;
 		}
 
+		CASE_3(NV097_SET_EYE_DIRECTION, 4):
+			slot = (method - NV097_SET_EYE_DIRECTION) / 4;
+			pg->ltctxa[NV_IGRAPH_XF_LTCTXA_EYED][slot] = parameter;
+			pg->ltctxa_dirty[NV_IGRAPH_XF_LTCTXA_EYED] = true;
+			break;
+
 		case NV097_SET_BEGIN_END: {
 			uint32_t control_0 = pg->regs[RI(NV_PGRAPH_CONTROL_0)];
 			uint32_t control_1 = pg->regs[RI(NV_PGRAPH_CONTROL_1)];
@@ -1353,37 +1588,37 @@ void pgraph_handle_method(NV2AState *d,
 			if (parameter == NV097_SET_BEGIN_END_OP_END) {
 
 				if (pg->draw_arrays_length) {
-					NV2A_DPRINTF_IF(false, "Draw Arrays");
+					NV2A_GL_DPRINTF(false, "Draw Arrays");
 					assert(pg->inline_buffer_length == 0);
 					assert(pg->inline_array_length == 0);
 					assert(pg->inline_elements_length == 0);
 				} else if (pg->inline_buffer_length) {
-					NV2A_DPRINTF_IF(false, "Inline Buffer");
+					NV2A_GL_DPRINTF(false, "Inline Buffer");
 					assert(pg->draw_arrays_length == 0);
 					assert(pg->inline_array_length == 0);
 					assert(pg->inline_elements_length == 0);
 				} else if (pg->inline_array_length) {
-					NV2A_DPRINTF_IF(false, "Inline Array");
+					NV2A_GL_DPRINTF(false, "Inline Array");
 					assert(pg->draw_arrays_length == 0);
 					assert(pg->inline_buffer_length == 0);
 					assert(pg->inline_elements_length == 0);
 				} else if (pg->inline_elements_length) {
-					NV2A_DPRINTF_IF(false, "Inline Elements");
+					NV2A_GL_DPRINTF(false, "Inline Elements");
 					assert(pg->draw_arrays_length == 0);
 					assert(pg->inline_buffer_length == 0);
 					assert(pg->inline_array_length == 0);
 				} else {
-					NV2A_DPRINTF_IF(true, "EMPTY NV097_SET_BEGIN_END");
+					NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
 					assert(false);
 				}
 
-				if (g_pgraph_backend.draw != nullptr) {
-					g_pgraph_backend.draw(d);
+				if (pgraph_draw != nullptr) {
+					pgraph_draw(d);
 				}
 
 				// End occlusion query and accumulate zpass pixel count
-				if (g_pgraph_backend.zpass_end != nullptr) {
-					g_pgraph_backend.zpass_end(d);
+				if (pgraph_zpass_end != nullptr) {
+					pgraph_zpass_end(d);
 				}
 			} else {
 
@@ -1391,13 +1626,13 @@ void pgraph_handle_method(NV2AState *d,
 
 				pg->primitive_mode = parameter;
 
-				if (g_pgraph_backend.draw_state_update != nullptr) {
-					g_pgraph_backend.draw_state_update(d);
+				if (pgraph_draw_state_update != nullptr) {
+					pgraph_draw_state_update(d);
 				}
 
 				// Begin occlusion query for zpass pixel counting
-				if (pg->zpass_pixel_count_enable && g_pgraph_backend.zpass_begin != nullptr) {
-					g_pgraph_backend.zpass_begin(d);
+				if (pg->zpass_pixel_count_enable && pgraph_zpass_begin != nullptr) {
+					pgraph_zpass_begin(d);
 				}
 
 				pg->inline_elements_length = 0;
@@ -1432,7 +1667,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(*reg, NV_PGRAPH_TEXPALETTE0_CONTEXT_DMA, dma_select);
 			SET_MASK(*reg, NV_PGRAPH_TEXPALETTE0_LENGTH, length);
 			SET_MASK(*reg, NV_PGRAPH_TEXPALETTE0_OFFSET, offset);
-			pg->dirty[NV2A_DIRTY_TEXTURE]++; // table already bumped dirty[NV2A_DIRTY_PGRAPH]
+			pg->regs_generation++;
 			// Also wrote: pg->texture_dirty[slot] = true; (field deleted)
 			break;
 		}
@@ -1480,24 +1715,23 @@ void pgraph_handle_method(NV2AState *d,
 
 			pg->draw_arrays_max_count = MAX(pg->draw_arrays_max_count, start + count);
 
-			assert(pg->draw_arrays_length < ARRAY_SIZE(pg->draw_arrays_start));
+			assert(pg->draw_arrays_length < ARRAY_SIZE(pg->gl_draw_arrays_start));
 
-			/* Attempt to connect contiguous primitives */
-			if (!pg->draw_arrays_prevent_connect && pg->draw_arrays_length > 0) {
+			/* Attempt to connect primitives */
+			if (pg->draw_arrays_length > 0) {
 				unsigned int last_start =
-					pg->draw_arrays_start[pg->draw_arrays_length - 1];
+					pg->gl_draw_arrays_start[pg->draw_arrays_length - 1];
 				int32_t* last_count =
-					&pg->draw_arrays_count[pg->draw_arrays_length - 1];
+					&pg->gl_draw_arrays_count[pg->draw_arrays_length - 1];
 				if (start == (last_start + *last_count)) {
 					*last_count += count;
 					break;
 				}
 			}
 
-			pg->draw_arrays_start[pg->draw_arrays_length] = start;
-			pg->draw_arrays_count[pg->draw_arrays_length] = count;
+			pg->gl_draw_arrays_start[pg->draw_arrays_length] = start;
+			pg->gl_draw_arrays_count[pg->draw_arrays_length] = count;
 			pg->draw_arrays_length++;
-			pg->draw_arrays_prevent_connect = false;
 			break;
 		}
 		case NV097_INLINE_ARRAY:
@@ -1577,9 +1811,10 @@ void pgraph_handle_method(NV2AState *d,
 			}
 			break;
 		}
-		case NV097_SET_SEMAPHORE_OFFSET:
-			break;
 		case NV097_BACK_END_WRITE_SEMAPHORE_RELEASE: {
+			//qemu_mutex_unlock(&pg->pgraph_lock);
+			//qemu_mutex_lock_iothread();
+
 			uint32_t semaphore_offset = pg->regs[RI(NV_PGRAPH_SEMAPHOREOFFSET)];
 
 			xbox::addr_xt semaphore_dma_len;
@@ -1594,12 +1829,15 @@ void pgraph_handle_method(NV2AState *d,
 
 			stl_le_p((uint32_t*)semaphore_data, parameter);
 
+			//qemu_mutex_lock(&pg->pgraph_lock);
+			//qemu_mutex_unlock_iothread();
+
 			break;
 		}
 		case NV097_CLEAR_SURFACE: {
 			pg->clear_surface_flags = parameter;
-			if (g_pgraph_backend.draw_clear != nullptr) {
-				g_pgraph_backend.draw_clear(d);
+			if (pgraph_draw_clear != nullptr) {
+				pgraph_draw_clear(d);
 			}
 			break;
 		}
@@ -1616,8 +1854,7 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_D)], NV_PGRAPH_CSV0_D_RANGE_MODE,
 				GET_MASK(parameter,
 					NV097_SET_TRANSFORM_EXECUTION_MODE_RANGE_MODE));
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			pg->regs_generation++;
 			break;
 		case NV097_SET_TRANSFORM_PROGRAM_LOAD:
 			assert(parameter < NV2A_MAX_TRANSFORM_PROGRAM_LENGTH);
@@ -1633,7 +1870,7 @@ void pgraph_handle_method(NV2AState *d,
 		CASE_4(NV097_SET_TRANSFORM_DATA, 4): {
 			// Stores input v0 components for the next LAUNCH_TRANSFORM_PROGRAM
 			slot = (method - NV097_SET_TRANSFORM_DATA) / 4;
-			pg->xf.vertex_state_shader_v0[slot] = parameter;
+			pg->vertex_state_shader_v0[slot] = parameter;
 			break;
 		}
 
@@ -1643,13 +1880,13 @@ void pgraph_handle_method(NV2AState *d,
 			// vsh_constants (transform context RAM) in-place.
 			unsigned int program_start = parameter;
 			assert(program_start < NV2A_MAX_TRANSFORM_PROGRAM_LENGTH);
-			if (g_pgraph_backend.launch_transform_program != nullptr) {
-				g_pgraph_backend.launch_transform_program(d, program_start);
+			if (pgraph_launch_transform_program != nullptr) {
+				pgraph_launch_transform_program(d, program_start);
 			}
 			break;
 		}
 
-		case NV097_SET_PROVOKING_VERTEX: 
+		case NV097_SET_FLAT_SHADE_OP: 
 			assert(parameter <= 1);
 			// Handled by method table: NV_PGRAPH_CONTROL_3_PROVOKING_VERTEX
 			break;
@@ -1662,23 +1899,20 @@ void pgraph_handle_method(NV2AState *d,
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_C)], NV_PGRAPH_CSV0_C_AMBIENT,  (parameter >> 2) & 3);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_C)], NV_PGRAPH_CSV0_C_DIFFUSE,  (parameter >> 4) & 3);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_C)], NV_PGRAPH_CSV0_C_SPECULAR, (parameter >> 6) & 3);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			pg->regs_generation++;
 			break;
 		}
 
 		case NV097_SET_TWO_SIDED_LIGHT_EN:
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_C)], NV_PGRAPH_CSV0_C_TWO_SIDE_LIGHTING, parameter ? 1 : 0);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			pg->regs_generation++;
 			break;
 
 		case NV097_SET_POINT_PARAMS_ENABLE:
 			// Writes to BOTH CSV0_D and CONTROL_3
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_D)], NV_PGRAPH_CSV0_D_POINTPARAMSENABLE, parameter ? 1 : 0);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CONTROL_3)], NV_PGRAPH_CONTROL_3_POINTPARAMSENABLE, parameter ? 1 : 0);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			pg->regs_generation++;
 			break;
 
 		case NV097_SET_LIGHT_CONTROL: {
@@ -1689,8 +1923,7 @@ void pgraph_handle_method(NV2AState *d,
 				(parameter & NV097_SET_LIGHT_CONTROL_LOCALEYE) ? 1 : 0);
 			SET_MASK(pg->regs[RI(NV_PGRAPH_CSV0_C)], NV_PGRAPH_CSV0_C_ALPHA_FROM_MATERIAL_SPECULAR,
 				(parameter & NV097_SET_LIGHT_CONTROL_ALPHA_FROM_MATERIAL_SPECULAR) ? 1 : 0);
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_SHADER]++;
+			pg->regs_generation++;
 			break;
 		}
 
@@ -1706,8 +1939,7 @@ void pgraph_handle_method(NV2AState *d,
 				break;
 			}
 			pg->regs[RI(NV_PGRAPH_POINTSIZE)] = parameter;
-			pg->dirty[NV2A_DIRTY_PGRAPH]++;
-			pg->dirty[NV2A_DIRTY_RASTERIZER]++;
+			pg->regs_generation++;
 			break;
 
 		// TODO: Implement these methods (not table-compatible due to value remapping or multi-reg writes).
@@ -1733,12 +1965,10 @@ void pgraph_handle_method(NV2AState *d,
 		//     pg->dma_notifies = parameter;
 		//     break;
 		case NV097_SET_CONTEXT_DMA_A:
-		    pg->dma_base[0] = NV2ADevice::ResolveDmaBaseAddress(d, parameter);
-		    pg->dirty[NV2A_DIRTY_TEXTURE]++;
+		    pg->dma_a = parameter;
 		    break;
 		case NV097_SET_CONTEXT_DMA_B:
-		    pg->dma_base[1] = NV2ADevice::ResolveDmaBaseAddress(d, parameter);
-		    pg->dirty[NV2A_DIRTY_TEXTURE]++;
+		    pg->dma_b = parameter;
 		    break;
 		// case NV097_SET_CONTEXT_DMA_STATE:
 		//     pg->dma_state = parameter;
@@ -1746,14 +1976,12 @@ void pgraph_handle_method(NV2AState *d,
 		// case NV097_SET_CONTEXT_DMA_ZETA:
 		//     pg->dma_zeta = parameter;
 		//     break;
-		case NV097_SET_CONTEXT_DMA_VERTEX_A:
-		    pg->dma_vertex_base[0] = NV2ADevice::ResolveDmaBaseAddress(d, parameter);
-		    pg->vertex_attributes_generation++;
-		    break;
-		case NV097_SET_CONTEXT_DMA_VERTEX_B:
-		    pg->dma_vertex_base[1] = NV2ADevice::ResolveDmaBaseAddress(d, parameter);
-		    pg->vertex_attributes_generation++;
-		    break;
+		// case NV097_SET_CONTEXT_DMA_VERTEX_A:
+		// case NV097_SET_CONTEXT_DMA_VERTEX_B:
+		//     DMA context methods are not needed under HLE: vertex attribute
+		//     offsets already store physical byte offsets into contiguous memory,
+		//     and both DMA contexts point to the same region.
+		//     break;
 		//
 		CASE_4(NV097_SET_TEXTURE_MATRIX_ENABLE, 4):
 		    slot = (method - NV097_SET_TEXTURE_MATRIX_ENABLE) / 4;
@@ -1763,11 +1991,11 @@ void pgraph_handle_method(NV2AState *d,
 		case NV097_SET_ZPASS_PIXEL_COUNT_ENABLE:
 		    pg->zpass_pixel_count_enable = parameter;
 		    if (parameter) {
-		        if (g_pgraph_backend.zpass_begin != nullptr)
-		            g_pgraph_backend.zpass_begin(d);
+		        if (pgraph_zpass_begin != nullptr)
+		            pgraph_zpass_begin(d);
 		    } else {
-		        if (g_pgraph_backend.zpass_end != nullptr)
-		            g_pgraph_backend.zpass_end(d);
+		        if (pgraph_zpass_end != nullptr)
+		            pgraph_zpass_end(d);
 		    }
 		    break;
 		//
@@ -1808,8 +2036,8 @@ void pgraph_handle_method(NV2AState *d,
 				pg->patch.swatch = parameter; // Store begin format
 			} else {
 				// End swatch - draw the accumulated curves and reset for next swatch
-				if (g_pgraph_backend.draw_patch != nullptr && pg->patch.active && pg->patch.curveCount > 0) {
-					g_pgraph_backend.draw_patch(d);
+				if (pgraph_draw_patch != nullptr && pg->patch.active && pg->patch.curveCount > 0) {
+					pgraph_draw_patch(d);
 				}
 				// Reset curves for next swatch (keep patch0-3 and active)
 				pg->patch.curveCount = 0;
@@ -1863,14 +2091,14 @@ void pgraph_handle_method(NV2AState *d,
 				pg->patch.currentCurveAttr = -1;
 			}
 			// Dispatch tessellation for any remaining curves (if swatch didn't already draw them)
-			if (g_pgraph_backend.draw_patch != nullptr && pg->patch.active && pg->patch.curveCount > 0) {
-				g_pgraph_backend.draw_patch(d);
+			if (pgraph_draw_patch != nullptr && pg->patch.active && pg->patch.curveCount > 0) {
+				pgraph_draw_patch(d);
 			}
 			pg->patch.active = false;
 			break;
 
 		default:
-			NV2A_DPRINTF_IF(true, "    unhandled  (0x%02x 0x%08x)",
+			NV2A_GL_DPRINTF(true, "    unhandled  (0x%02x 0x%08x)",
 					graphics_class, method);
 			break;
 		}
@@ -1878,7 +2106,7 @@ void pgraph_handle_method(NV2AState *d,
 	}
 
 	default:
-		NV2A_DPRINTF_IF(true, "Unknown Graphics Class/Method 0x%08X/0x%08X",
+		NV2A_GL_DPRINTF(true, "Unknown Graphics Class/Method 0x%08X/0x%08X",
 						graphics_class, method);
 		break;
 	}
@@ -1933,7 +2161,7 @@ static void pgraph_log_method(unsigned int subchannel,
 
 	if (last == 0x1800 && method != last) {
 		const char* method_name = NV2AMethodToString(last); // = 'NV2A_VB_ELEMENT_U16'
-		NV2A_DPRINTF_IF(true, "d->pgraph method (%d) 0x%08X %s * %d",
+		NV2A_GL_DPRINTF(true, "d->pgraph method (%d) 0x%08X %s * %d",
 						subchannel, last, method_name, count);
 	}
 	if (method != 0x1800) {
@@ -1976,14 +2204,9 @@ static void pgraph_allocate_inline_buffer_vertices(PGRAPHState *pg,
         return;
     }
 
-    /* Reuse persistent pool allocation to avoid malloc/free per draw */
-    if (!vertex_attribute->inline_buffer_pool) {
-        vertex_attribute->inline_buffer_pool = (float*)g_malloc(NV2A_MAX_BATCH_LENGTH
-                                                      * sizeof(float) * 4);
-    }
-    vertex_attribute->inline_buffer = vertex_attribute->inline_buffer_pool;
-
     /* Now upload the previous vertex_attribute value */
+    vertex_attribute->inline_buffer = (float*)g_malloc(NV2A_MAX_BATCH_LENGTH
+                                                  * sizeof(float) * 4);
     for (i = 0; i < pg->inline_buffer_length; i++) {
         memcpy(&vertex_attribute->inline_buffer[i * 4],
                vertex_attribute->inline_value,

@@ -26,7 +26,6 @@
 #ifndef BACKEND_D3D11_INTERNAL_H
 #define BACKEND_D3D11_INTERNAL_H
 
-#undef LOG_PREFIX
 #define LOG_PREFIX CXBXR_MODULE::D3D8
 
 #include "Backend_D3D11.h"
@@ -35,6 +34,7 @@
 #include "core\hle\D3D8\XbD3D8Logging.h"
 #include "core\hle\D3D8\XbConvert.h"
 #include "core\hle\D3D8\XbVertexShader.h"
+#include "../TextureStates.h"
 #include "core\hle\D3D8\Rendering\Backend\Shading\Shader.h"
 
 #include <cstring>
@@ -55,8 +55,7 @@ extern ComPtr<ID3D11BlendState>        g_pD3DBlendState;
 // * Constant buffer shadow arrays
 // ******************************************************************
 extern float g_D3D11VSConstants[CXBX_D3D11_VS_CB_COUNT][4];
-extern UINT  g_D3D11VSConstantsDirtyMin;
-extern UINT  g_D3D11VSConstantsDirtyMax;
+extern bool  g_bD3D11VSConstantsDirty;
 
 // ******************************************************************
 // * Blit shader resources
@@ -116,6 +115,8 @@ extern ID3D11Buffer              *g_pD3D11FormatConvertCB;
 // ******************************************************************
 extern ID3D11PixelShader         *g_pD3D11RCInterpreterPS;       // RC interpreter ubershader
 extern ID3D11Buffer              *g_pD3D11RCInterpreterAuxCB;  // PSAuxCBLayout (software-computed fields)
+extern ID3D11Buffer              *g_pD3D11PGRegsBuf;            // pg->regs[] raw StructuredBuffer
+extern ID3D11ShaderResourceView  *g_pD3D11PGRegsSRV;            // SRV for g_PGRegs : register(t12)
 
 // RC interpreter constant buffer layout — shared with the HLSL cbuffer
 // definition in CxbxRegisterCombinerInterpreterState.hlsli.
@@ -128,7 +129,7 @@ extern ID3D11Buffer              *g_pD3D11RCInterpreterAuxCB;  // PSAuxCBLayout 
 extern bool                       g_bUseVSInterpreter;
 extern ID3D11VertexShader        *g_pD3D11VSInterpreterVS;
 extern ID3DBlob                  *g_pD3D11VSInterpreterBytecode;
-extern ID3D11Buffer              *g_pD3D11XFPRBuf;              // XFPR (Transform Program RAM) StructuredBuffer — pg->xf.xfpr[]
+extern ID3D11Buffer              *g_pD3D11XFPRBuf;              // XFPR (Transform Program RAM) StructuredBuffer — pg->program_data[]
 extern ID3D11ShaderResourceView  *g_pD3D11XFPRSRV;              // SRV for g_XFPR : register(t5)
 
 // VS interpreter instruction field constants — shared with HLSL.

@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="..\lib86cpu-uwp\lib86cpu-uwp.vcxproj" Id="bc31f8e6-8a11-49d0-ac7c-fa3e00a49e21" />
+  <Project Path="Cxbx-R-uwp.vcxproj" Id="8ed39cea-3a55-43ab-9114-f2226b167da9">
+    <Deploy />
+  </Project>
+</Solution>

@@ -47,7 +47,7 @@ void CxbxrUnlockFilePath();
 // Hybrid functions depending on specific platforms
 bool CxbxrIsElevated();
 
-std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess, bool isReboot = false);
+std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess);
 
 /*! cleanup emulation */
 [[noreturn]] void CxbxrAbortEx(CXBXR_MODULE cxbxr_module, const char* szErrorMessage, ...);

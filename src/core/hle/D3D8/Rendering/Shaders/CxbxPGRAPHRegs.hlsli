@@ -15,20 +15,16 @@
 #define CXBX_PGRAPH_REGS_HLSLI
 
 // ============================================================
-// The combined GPU memory buffer — 64 MiB RAM + appended PGRAPH (8 KB).
-// Bound as a ByteAddressBuffer at t12 for the PS/VS stages that need
-// PGRAPH register access. This is the same physical buffer as t0
-// (g_VtxData) but bound separately so the PS stage can access it
-// without conflicting with texture slots at t0-t3.
+// The raw PGRAPH regs[] buffer — 2048 uint32 elements (8 KB).
+// Bound as a StructuredBuffer<uint> at t12 (avoids t0-t11 texture slots).
+// Shared by both PS (register combiner interpreter) and VS (vertex
+// shader interpreter) stages — the same GPU buffer is bound to both.
 // ============================================================
-ByteAddressBuffer g_PGRegs : register(t12);
+StructuredBuffer<uint> g_PGRegs : register(t12);
 
-// PGRAPH block sits at offset 0x04000000 within the combined buffer
-#define GPU_PGRAPH_BASE 0x04000000u
-
-// --- Register accessor helpers (byte offset → raw load) ---
-uint PG_UINT(uint byteOff)   { return g_PGRegs.Load(GPU_PGRAPH_BASE + byteOff); }
-float PG_FLOAT(uint byteOff) { return asfloat(g_PGRegs.Load(GPU_PGRAPH_BASE + byteOff)); }
+// --- Register index helper (byte offset → array index) ---
+uint PG_UINT(uint byteOff)   { return g_PGRegs[byteOff >> 2]; }
+float PG_FLOAT(uint byteOff) { return asfloat(g_PGRegs[byteOff >> 2]); }
 
 // ============================================================
 // NV_PGRAPH register byte offsets (from nv2a_regs.h)
@@ -64,7 +60,6 @@ float PG_FLOAT(uint byteOff) { return asfloat(g_PGRegs.Load(GPU_PGRAPH_BASE + by
 #define NV_PGRAPH_CONTROL_0                 0x194C
 #define NV_PGRAPH_CONTROL_0_ALPHAREF        0x000000FF
 #define NV_PGRAPH_CONTROL_0_ALPHAFUNC       0x00000F00
-#define NV_PGRAPH_CONTROL_0_ALPHAFUNC_SHIFT 8
 #define NV_PGRAPH_CONTROL_0_ALPHATESTENABLE 0x00001000
 
 // Fog color (ABGR packed)
@@ -72,22 +67,8 @@ float PG_FLOAT(uint byteOff) { return asfloat(g_PGRegs.Load(GPU_PGRAPH_BASE + by
 
 // Shader control registers
 #define NV_PGRAPH_SHADERCLIPMODE            0x1994
-#define NV_PGRAPH_SHADERCLIPMODE_STAGE_BITS 4       // 4 bits (RSTQ) per stage
-#define NV_PGRAPH_SHADERCLIPMODE_STAGE_MASK 0xFu
-
 #define NV_PGRAPH_SHADERCTL                 0x1998
-// PSDotMapping: bits [11:0], 3-bit field per stage (stages 1-3), stride 4 bits
-#define NV_PGRAPH_SHADERCTL_DOTMAP_STRIDE   4
-#define NV_PGRAPH_SHADERCTL_DOTMAP_MASK     0x7u
-// PSInputTexture: bits [12:27], source-stage config per texture stage
-#define NV_PGRAPH_SHADERCTL_PST2_SHIFT      16      // stage 2: 1-bit field
-#define NV_PGRAPH_SHADERCTL_PST2_MASK       0x1u
-#define NV_PGRAPH_SHADERCTL_PST3_SHIFT      20      // stage 3: 2-bit field
-#define NV_PGRAPH_SHADERCTL_PST3_MASK       0x3u
-
 #define NV_PGRAPH_SHADERPROG                0x199C
-// PSTextureModes: 5-bit field per stage, packed sequentially
-#define NV_PGRAPH_SHADERPROG_STAGE_BITS     5
 
 // Shadow mapping control
 #define NV_PGRAPH_SHADOWCTL                 0x19A4
@@ -105,10 +86,7 @@ float PG_FLOAT(uint byteOff) { return asfloat(g_PGRegs.Load(GPU_PGRAPH_BASE + by
 // ============================================================
 // Color unpacking: ABGR uint32 → float4 RGBA [0..1]
 //
-// Legacy unpacker kept for any PGRAPH registers that happen to
-// store colors in ABGR byte order.  Most NV2A color registers
-// (combiner factors, specfog factors, fog color) are ARGB —
-// use PG_COLOR_ARGB / UnpackARGB for those.
+// NV2A stores color registers in ABGR byte order:
 //   bits  0-7  = R
 //   bits  8-15 = G
 //   bits 16-23 = B

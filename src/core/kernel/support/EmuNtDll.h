@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have received a copy of the GNU General Public License
+// *  You should have recieved a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -415,6 +415,70 @@ typedef enum _SEMAPHORE_INFORMATION_CLASS {
 
 // ******************************************************************
 // * EVENT_TYPE
+// ******************************************************************
+typedef enum _EVENT_TYPE
+{
+    NotificationEvent = 0,
+    SynchronizationEvent
+}
+EVENT_TYPE;
+
+// ******************************************************************
+// * EVENT_INFORMATION_CLASS
+// ******************************************************************
+typedef enum _EVENT_INFORMATION_CLASS {
+	EventBasicInformation
+} EVENT_INFORMATION_CLASS, *PEVENT_INFORMATION_CLASS;
+
+// ******************************************************************
+// * TIMER_TYPE
+// ******************************************************************
+typedef enum _TIMER_TYPE
+{
+	NotificationTimer,
+	SynchronizationTimer
+}
+TIMER_TYPE;
+
+// ******************************************************************
+// * TIMER_INFORMATION_CLASS
+// ******************************************************************
+typedef enum _TIMER_INFORMATION_CLASS
+{
+	TimerBasicInformation
+}
+TIMER_INFORMATION_CLASS, *PTIMER_INFORMATION_CLASS;
+
+// ******************************************************************
+// * TIMER_BASIC_INFORMATION
+// ******************************************************************
+typedef struct _TIMER_BASIC_INFORMATION
+{
+	LARGE_INTEGER TimeRemaining;
+	BOOLEAN SignalState;
+}
+TIMER_BASIC_INFORMATION, *PTIMER_BASIC_INFORMATION;
+
+// ******************************************************************
+// * PTIMER_APC_ROUTINE
+// ******************************************************************
+typedef VOID(NTAPI * PTIMER_APC_ROUTINE)
+(
+	IN PVOID TimerContext,
+	IN ULONG TimerLowValue,
+	IN LONG TimerHighValue
+);
+
+// ******************************************************************
+// * OBJECT_WAIT_TYPE
+// ******************************************************************
+typedef enum _OBJECT_WAIT_TYPE
+{
+    WaitAllObject,
+    WaitAnyObject
+}
+OBJECT_WAIT_TYPE;
+
 // ******************************************************************
 // * CREATE_FILE_TYPE
 // ******************************************************************
@@ -1337,6 +1401,182 @@ typedef VOID (NTAPI *FPTR_RtlLeaveCriticalSection)
 );
 
 // ******************************************************************
+// * NtWaitForSingleObject
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtWaitForSingleObject)
+(
+    IN HANDLE               ObjectHandle,
+    IN BOOLEAN              Alertable,
+    IN PLARGE_INTEGER       TimeOut
+);
+
+// ******************************************************************
+// * NtWaitForMultipleObjects
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtWaitForMultipleObjects)
+(
+    IN ULONG                ObjectCount,
+    IN PHANDLE              ObjectsArray,
+    IN OBJECT_WAIT_TYPE     WaitType,
+    IN BOOLEAN              Alertable,
+    IN PLARGE_INTEGER       TimeOut OPTIONAL
+);
+
+// ******************************************************************
+// * NtCreateEvent
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtCreateEvent)
+(
+    OUT PHANDLE             EventHandle,
+    IN  ACCESS_MASK         DesiredAccess,
+    IN  POBJECT_ATTRIBUTES  ObjectAttributes OPTIONAL,
+    IN  EVENT_TYPE          EventType,
+    IN  BOOLEAN             InitialState
+);
+
+// ******************************************************************
+// * NtQueryEvent
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtQueryEvent)
+(
+	IN HANDLE EventHandle,
+	IN EVENT_INFORMATION_CLASS EventInformationClass,
+	OUT PVOID EventInformation,
+	IN ULONG EventInformationLength,
+	OUT PULONG ReturnLength OPTIONAL
+);
+
+// ******************************************************************
+// * NtPulseEvent
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtPulseEvent)
+(
+	IN HANDLE	EventHandle,
+	OUT PLONG	PreviousState OPTIONAL
+);
+
+// ******************************************************************
+// * NtResetEvent
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtResetEvent)
+(
+    IN HANDLE	EventHandle,
+    OUT PLONG	PreviousState OPTIONAL
+);
+
+// ******************************************************************
+// * NtCreateMutant
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtCreateMutant)
+(
+    OUT PHANDLE             MutantHandle,
+    IN  ACCESS_MASK         DesiredAccess,
+    IN  POBJECT_ATTRIBUTES  ObjectAttributes OPTIONAL,
+    IN  BOOLEAN             InitialOwner
+);
+
+// ******************************************************************
+// * NtQueryMutant
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtQueryMutant)
+(
+	IN HANDLE MutantHandle,
+	IN MUTANT_INFORMATION_CLASS MutantInformationClass,
+	OUT PVOID MutantInformation,
+	IN ULONG MutantInformationLength,
+	OUT PULONG ReturnLength OPTIONAL
+);
+
+// ******************************************************************
+// * NtReleaseMutant
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtReleaseMutant)
+(
+    IN  HANDLE              MutantHandle,
+    OUT PLONG               PreviousCount OPTIONAL
+);
+
+// ******************************************************************
+// * NtCreateSemaphore
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtCreateSemaphore)
+(
+    OUT PHANDLE             SemaphoreHandle,
+    IN  ACCESS_MASK         DesiredAccess,
+    IN  POBJECT_ATTRIBUTES  ObjectAttributes OPTIONAL,
+    IN  ULONG               InitialCount,
+    IN  ULONG               MaximumCount
+);
+
+// ******************************************************************
+// * NtQuerySemaphore
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtQuerySemaphore)
+(
+	IN HANDLE SemaphoreHandle,
+	IN SEMAPHORE_INFORMATION_CLASS SemaphoreInformationClass,
+	OUT PVOID SemaphoreInformation,
+	IN ULONG SemaphoreInformationLength,
+	OUT PULONG ReturnLength OPTIONAL
+);
+
+// ******************************************************************
+// * NtReleaseSemaphore
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtReleaseSemaphore)
+(
+    IN  HANDLE              SemaphoreHandle,
+    IN  ULONG               ReleaseCount,
+    OUT PULONG              PreviousCount OPTIONAL
+);
+
+// ******************************************************************
+// * NtCreateTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtCreateTimer)
+(
+	OUT PHANDLE             TimerHandle,
+	IN  ACCESS_MASK         DesiredAccess,
+	IN  POBJECT_ATTRIBUTES  ObjectAttributes OPTIONAL,
+	IN  TIMER_TYPE          TimerType
+);
+
+// ******************************************************************
+// * SetTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtSetTimer)
+(
+	IN HANDLE 	TimerHandle,
+	IN PLARGE_INTEGER 	DueTime,
+	IN PTIMER_APC_ROUTINE TimerApcRoutine 	OPTIONAL,
+	IN PVOID TimerContext 	OPTIONAL,
+	IN BOOLEAN 	WakeTimer,
+	IN LONG Period 	OPTIONAL,
+	OUT PBOOLEAN PreviousState 	OPTIONAL
+);
+
+// ******************************************************************
+// * QueryTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtQueryTimer)
+(
+	IN HANDLE 	TimerHandle,
+	IN TIMER_INFORMATION_CLASS 	TimerInformationClass,
+	OUT PVOID 	TimerInformation,
+	IN ULONG 	TimerInformationLength,
+	OUT PULONG ReturnLength 	OPTIONAL
+);
+
+// ******************************************************************
+// * NtCancelTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtCancelTimer)
+(
+	IN HANDLE TimerHandle,
+	OUT PBOOLEAN CurrentState OPTIONAL
+);
+
+// ******************************************************************
 // * NtCreateFile
 // ******************************************************************
 typedef NTSTATUS (NTAPI *FPTR_NtCreateFile)
@@ -1374,6 +1614,14 @@ typedef NTSTATUS(NTAPI *FPTR_NtCreateDirectoryObject)
 
 
 // ******************************************************************
+// * NtClearEvent
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtClearEvent)
+(
+    IN HANDLE               EventHandle
+);
+
+// ******************************************************************
 // * NtClose
 // ******************************************************************
 typedef NTSTATUS (NTAPI *FPTR_NtClose)
@@ -1399,7 +1647,7 @@ typedef NTSTATUS (NTAPI *FPTR_NtOpenFile)
 // ******************************************************************
 typedef NTSTATUS (NTAPI *FPTR_NtReadFile)
 (
-    IN  HANDLE          FileHandle,
+    IN  HANDLE          FileHandle,            // TODO: correct paramters
     IN  HANDLE          Event OPTIONAL,
     IN  PVOID           ApcRoutine OPTIONAL,
     IN  PVOID           ApcContext,
@@ -1415,7 +1663,7 @@ typedef NTSTATUS (NTAPI *FPTR_NtReadFile)
 // ******************************************************************
 typedef NTSTATUS (NTAPI *FPTR_NtWriteFile)
 (
-    IN  HANDLE          FileHandle,
+    IN  HANDLE          FileHandle,            // TODO: correct paramters
     IN  HANDLE          Event OPTIONAL,
     IN  PVOID           ApcRoutine OPTIONAL,
     IN  PVOID           ApcContext,
@@ -1436,7 +1684,7 @@ typedef VOID (NTAPI *FPTR_NtYieldExecution)();
 // ******************************************************************
 typedef NTSTATUS (NTAPI *FPTR_NtSetInformationFile)
 (
-    IN  HANDLE  FileHandle,
+    IN  HANDLE  FileHandle,            // TODO: correct paramters
     OUT PVOID   IoStatusBlock,
     IN  PVOID   FileInformation,
     IN  ULONG   Length,
@@ -1459,6 +1707,15 @@ typedef NTSTATUS (NTAPI *FPTR_NtResumeThread)
 (
     IN  HANDLE  ThreadHandle,
     OUT PULONG  SuspendCount OPTIONAL
+);
+
+// ******************************************************************
+// * NtSetEvent
+// ******************************************************************
+typedef NTSTATUS (NTAPI *FPTR_NtSetEvent)
+(
+    IN  HANDLE  EventHandle,
+    OUT PLONG   PreviousState OPTIONAL
 );
 
 // ******************************************************************
@@ -1598,6 +1855,40 @@ typedef NTSTATUS(NTAPI *FPTR_NtFsControlFile)
 );
 
 // ******************************************************************
+// * NtCreateTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtCreateTimer)
+(
+	OUT PHANDLE				TimerHandle,
+	IN  ACCESS_MASK			DesiredAccess,
+	IN  POBJECT_ATTRIBUTES	ObjectAttributes OPTIONAL,
+	IN  TIMER_TYPE			TimerType
+);
+
+// ******************************************************************
+// * NtSetTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtSetTimer)
+(
+	IN  HANDLE				TimerHandle,
+	IN  PLARGE_INTEGER		DueTime,
+	IN  PTIMER_APC_ROUTINE	TimerApcRoutine OPTIONAL,
+	IN  PVOID				TimerContext OPTIONAL,
+	IN  BOOLEAN				ResumeTimer,
+	IN  LONG				Period OPTIONAL,
+	OUT PBOOLEAN			PreviousState OPTIONAL
+);
+
+// ******************************************************************
+// * NtCancelTimer
+// ******************************************************************
+typedef NTSTATUS(NTAPI *FPTR_NtCancelTimer)
+(
+	IN  HANDLE				TimerHandle,
+	OUT PBOOLEAN			CurrentState OPTIONAL
+);
+
+// ******************************************************************
 // * Exported API
 // ******************************************************************
 #define EXTERN(API)  extern FPTR_##API API
@@ -1614,9 +1905,15 @@ EXTERN(InterlockedPopEntrySList);
 EXTERN(InterlockedPushEntrySList);
 */
 EXTERN(NtAllocateVirtualMemory);
+EXTERN(NtCancelTimer);
+EXTERN(NtClearEvent);
 EXTERN(NtClose);
 EXTERN(NtCreateDirectoryObject);
+EXTERN(NtCreateEvent);
 EXTERN(NtCreateFile);
+EXTERN(NtCreateMutant);
+EXTERN(NtCreateSemaphore);
+EXTERN(NtCreateTimer);
 EXTERN(NtDelayExecution);
 EXTERN(NtDeleteFile);
 EXTERN(NtDeviceIoControlFile);
@@ -1625,17 +1922,29 @@ EXTERN(NtFlushBuffersFile);
 EXTERN(NtFreeVirtualMemory);
 EXTERN(NtFsControlFile);
 EXTERN(NtOpenSymbolicLinkObject);
+EXTERN(NtPulseEvent);
 EXTERN(NtQueryDirectoryFile);
+EXTERN(NtQueryEvent);
 EXTERN(NtQueryFullAttributesFile);
 EXTERN(NtQueryInformationFile);
+EXTERN(NtQueryMutant);
+EXTERN(NtQuerySemaphore);
+EXTERN(NtQueryTimer);
 EXTERN(NtQueryVirtualMemory);
 EXTERN(NtQueryVolumeInformationFile);
 EXTERN(NtQueueApcThread);
 EXTERN(NtReadFile);
+EXTERN(NtReleaseMutant);
+EXTERN(NtReleaseSemaphore);
+EXTERN(NtResetEvent);
 EXTERN(NtResumeThread);
+EXTERN(NtSetEvent);
 EXTERN(NtSetInformationFile);
 EXTERN(NtSetLdtEntries);
+EXTERN(NtSetTimer);
 EXTERN(NtSuspendThread);
+EXTERN(NtWaitForMultipleObjects);
+EXTERN(NtWaitForSingleObject);
 EXTERN(NtWriteFile);
 EXTERN(NtYieldExecution);
 EXTERN(RtlAllocateHeap);

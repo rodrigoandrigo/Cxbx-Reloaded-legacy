@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{BC31F8E6-8A11-49D0-AC7C-FA3E00A49E21}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>lib86cpu_uwp</RootNamespace>
+    <DefaultLanguage>pt-BR</DefaultLanguage>
+    <MinimumVisualStudioVersion>14.0</MinimumVisualStudioVersion>
+    <AppContainerApplication>true</AppContainerApplication>
+    <ApplicationType>Windows Store</ApplicationType>
+    <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.18362.0</WindowsTargetPlatformMinVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><WholeProgramOptimization>true</WholeProgramOptimization><PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <Lib86CpuRoot>$(ProjectDir)..\..\import\lib86cpu</Lib86CpuRoot>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>lib86cpu-uwp</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <CompileAsWinRT>false</CompileAsWinRT>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/bigobj /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+      <FloatingPointModel>Strict</FloatingPointModel>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(Lib86CpuRoot)\include;$(Lib86CpuRoot)\lib86cpu;$(Lib86CpuRoot)\lib86cpu\dbg;$(Lib86CpuRoot)\lib86cpu\core;$(Lib86CpuRoot)\lib86cpu\core\emitter;$(Lib86CpuRoot)\lib86cpu\core\emitter\x64;$(Lib86CpuRoot)\lib86cpu\core\emitter\x64\windows;$(Lib86CpuRoot)\lib86cpu\core\windows;$(Lib86CpuRoot)\import\asmjit\src;$(Lib86CpuRoot)\import\zydis\include;$(Lib86CpuRoot)\import\zydis\src;$(Lib86CpuRoot)\import\zydis\dependencies\zycore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WINAPI_FAMILY=WINAPI_FAMILY_APP;ASMJIT_STATIC;ASMJIT_NO_FOREIGN;ASMJIT_NO_AARCH32;ASMJIT_NO_AARCH64;LIB86CPU_X64_EMITTER;LIB86CPU_HEADLESS;XBOX_CPU;CODE_CACHE_MAX_SIZE=4096;ZYCORE_STATIC_BUILD;ZYDIS_STATIC_BUILD;ZYDIS_DISABLE_ENCODER;ZYDIS_DISABLE_AVX512;ZYDIS_DISABLE_KNC;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_SCL_SECURE_NO_WARNINGS;__STDC_FORMAT_MACROS;__STDC_CONSTANT_MACROS;__STDC_LIMIT_MACROS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4146;4355;4624;4800</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\interface.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\support.cpp">
+      <ObjectFileName>$(IntDir)lib86cpu-support.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\allocator.cpp">
+      <ObjectFileName>$(IntDir)lib86cpu-allocator.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\breakpoint.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\decode.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\fpu.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\fpu_instructions.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\helpers.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\instructions.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\memory_management.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\translate.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\emitter\emitter_common.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\emitter\x64\jit.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\emitter\x64\support.cpp">
+      <ObjectFileName>$(IntDir)x64-emitter-support.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\emitter\x64\windows\ipt.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\windows\clock.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\lib86cpu\core\windows\os_exceptions.cpp" />
+    <ClCompile Include="UwpOsMemory.cpp" />
+    <ClCompile Include="HeadlessDebugger.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\import\asmjit\src\asmjit\core\*.cpp">
+      <ObjectFileName>$(IntDir)asmjit-core-%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\asmjit\src\asmjit\x86\*.cpp" />
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\src\*.c">
+      <ObjectFileName>$(IntDir)zydis-%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Update="$(Lib86CpuRoot)\import\zydis\src\Encoder.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Update="$(Lib86CpuRoot)\import\zydis\src\EncoderData.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\Allocator.c">
+      <ObjectFileName>$(IntDir)zycore-Allocator.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\Bitset.c">
+      <ObjectFileName>$(IntDir)zycore-Bitset.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\Format.c">
+      <ObjectFileName>$(IntDir)zycore-Format.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\List.c">
+      <ObjectFileName>$(IntDir)zycore-List.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\String.c">
+      <ObjectFileName>$(IntDir)zycore-String.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\Vector.c">
+      <ObjectFileName>$(IntDir)zycore-Vector.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\Zycore.c">
+      <ObjectFileName>$(IntDir)zycore-Zycore.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(Lib86CpuRoot)\import\zydis\dependencies\zycore\src\API\Memory.c">
+      <ObjectFileName>$(IntDir)zycore-api-Memory.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
