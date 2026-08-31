@@ -176,6 +176,16 @@ static struct {
 
 std::string GenerateExecDirectoryStr()
 {
+#if defined(CXBXR_UWP)
+	// The installed package directory is immutable. For an embedded UWP core,
+	// "portable" means the app-local data root brokered by the host, so choosing
+	// Yes on the first-launch prompt remains writable and restart-persistent.
+	char localFolder[MAX_PATH]{};
+	if (g_EmuShared) {
+		g_EmuShared->GetDataLocation(localFolder);
+	}
+	return localFolder;
+#else
 	std::string exec_path;
 	(void)cli_config::GetValue(cli_config::exec, &exec_path);
 	auto pos = exec_path.find_last_of("\\/");
@@ -187,6 +197,7 @@ std::string GenerateExecDirectoryStr()
 	GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
 	std::string fullPath(modulePath);
 	return fullPath.substr(0, fullPath.find_last_of("\\/"));
+#endif
 }
 
 // NOTE: This function will be only have Qt support, std::filesystem doesn't have generic support.
@@ -802,6 +813,13 @@ void Settings::Delete()
 // Universal update to EmuShared from both standalone kernel, and GUI process.
 void Settings::SyncToEmulator()
 {
+	// Resolve this before SetCoreSettings: szStorageLocation is runtime state,
+	// not an INI field, and copying the default m_core first would erase the
+	// brokered UWP LocalFolder that GenerateUserProfileDirectoryStr reads.
+	const std::string dataLocation = GetDataLocation();
+	strncpy(m_core.szStorageLocation, dataLocation.c_str(), xbox::max_path - 1);
+	m_core.szStorageLocation[xbox::max_path - 1] = '\0';
+
 	// register Core settings
 	g_EmuShared->SetCoreSettings(&m_core);
 	g_EmuShared->SetIsKrnlLogEnabled(m_core.KrnlDebugMode != DebugMode::DM_NONE);
@@ -849,7 +867,7 @@ void Settings::SyncToEmulator()
 	g_EmuShared->SetHackSettings(&m_hacks);
 
 	// register data location setting
-	g_EmuShared->SetDataLocation(GetDataLocation().c_str());
+	g_EmuShared->SetDataLocation(dataLocation.c_str());
 
 	// reset title mount path
 	g_EmuShared->SetTitleMountPath("");
@@ -969,7 +987,13 @@ CXBX_DATA Settings::SetupFile(std::string& file_path_out)
 {
 	std::string setupFile;
 	CXBX_DATA data_ret = CXBX_DATA_INVALID;
-#ifdef RETRO_API_VERSION // TODO: Change me to #ifndef QT_VERSION
+#if defined(CXBXR_UWP)
+	// A packaged app cannot write beside its executable. LocalFolder is the
+	// single persistent, writable settings location, so no desktop portable-mode
+	// question should be shown to an Xbox/UWP user.
+	setupFile = GenerateUserProfileDirectoryStr();
+	data_ret = setupFile.empty() ? CXBX_DATA_INVALID : CXBX_DATA_APPDATA;
+#elif defined(RETRO_API_VERSION) // TODO: Change me to #ifndef QT_VERSION
 	// Can only have one option without Qt.
 	setupFile = GenerateExecDirectoryStr();
 

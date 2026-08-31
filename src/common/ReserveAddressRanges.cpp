@@ -41,6 +41,32 @@
 #include "ReserveAddressRanges.h"
 #include "AddressRanges.h"
 
+static uint32_t g_LastReservationBase;
+static uint32_t g_LastReservationSize;
+static DWORD g_LastReservationError;
+
+static LPVOID AllocateMemoryAt(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
+{
+#if defined(CXBXR_UWP)
+	// Guest x86 is translated by TCG, so the host mapping is data and does not
+	// require executable permission. Using the AppContainer API also avoids the
+	// desktop VirtualAlloc contract inside a packaged UWP process.
+	if (protect == PAGE_EXECUTE_READWRITE) {
+		protect = PAGE_READWRITE;
+	}
+	return VirtualAllocFromApp(address, size, allocationType, protect);
+#else
+	return VirtualAlloc(address, size, allocationType, protect);
+#endif
+}
+
+static void RememberReservationFailure(uint32_t base, uint32_t size)
+{
+	g_LastReservationBase = base;
+	g_LastReservationSize = size;
+	g_LastReservationError = GetLastError();
+}
+
 static HANDLE CreateAnonymousMemoryMapping(SIZE_T size)
 {
 #if defined(CXBXR_UWP)
@@ -91,7 +117,7 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 	// with VEH-based redirect to contiguous memory. This breaks the MapViewOfFileEx
 	// alias between 0x80000000 and 0xF0000000 (which is unnecessary under HLE).
 	if (Start == PHYSICAL_MAP1_BASE) {
-		LPVOID Result = VirtualAlloc(
+		LPVOID Result = AllocateMemoryAt(
 			(LPVOID)Start, Size,
 			MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
 			PAGE_EXECUTE_READWRITE);
@@ -99,10 +125,11 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 		std::printf("     : VirtualAlloc(MEM_WRITE_WATCH); Start = 0x%08X; Result = %p\n", Start, Result);
 #endif
 		if (Result == nullptr) {
+			RememberReservationFailure(Start, static_cast<uint32_t>(Size));
 			HadAnyFailure = true;
 		}
 	} else if (Start == TILED_MEMORY_BASE) {
-		LPVOID Result = VirtualAlloc(
+		LPVOID Result = AllocateMemoryAt(
 			(LPVOID)Start, Size,
 			MEM_RESERVE,
 			PAGE_NOACCESS);
@@ -110,6 +137,7 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 		std::printf("     : VirtualAlloc(PAGE_NOACCESS); Start = 0x%08X; Result = %p\n", Start, Result);
 #endif
 		if (Result == nullptr) {
+			RememberReservationFailure(Start, static_cast<uint32_t>(Size));
 			HadAnyFailure = true;
 		}
 	} else
@@ -165,8 +193,9 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 		default: {
 			while (Size > 0) {
 				SIZE_T BlockSize = (SIZE_T)(Size > BLOCK_SIZE) ? BLOCK_SIZE : Size;
-				LPVOID Result = VirtualAlloc((LPVOID)Start, BlockSize, MEM_RESERVE, Protect);
+				LPVOID Result = AllocateMemoryAt((LPVOID)Start, BlockSize, MEM_RESERVE, Protect);
 				if (Result == nullptr) {
+					RememberReservationFailure(Start, static_cast<uint32_t>(BlockSize));
 					HadAnyFailure = true;
 				}
 #ifdef DEBUG
@@ -368,4 +397,19 @@ bool isSystemFlagSupport(unsigned int reserved_systems, unsigned int assign_syst
 	}
 
 	return false;
+}
+
+uint32_t GetLastAddressReservationBase()
+{
+	return g_LastReservationBase;
+}
+
+uint32_t GetLastAddressReservationSize()
+{
+	return g_LastReservationSize;
+}
+
+unsigned long GetLastAddressReservationError()
+{
+	return g_LastReservationError;
 }

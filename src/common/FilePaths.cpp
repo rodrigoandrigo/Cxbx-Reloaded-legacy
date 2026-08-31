@@ -71,6 +71,14 @@ static std::wstring WideFromUtf8(const std::string& value)
 // Let filesystem library clean it up for us, including resolve host's symbolic link path.
 // Since internal kernel do translate to full path than preserved host symoblic link path.
 void CxbxResolveHostToFullPath(std::filesystem::path& file_path, std::string_view finish_error_sentence) {
+#if defined(CXBXR_UWP)
+	// ApplicationData paths are already absolute and brokered by the package.
+	// canonical() opens the directory through GetFinalPathNameByHandleW, which
+	// is a desktop operation and returns ACCESS_DENIED inside AppContainer.
+	(void)finish_error_sentence;
+	file_path = file_path.lexically_normal();
+	return;
+#else
 	std::error_code error;
 	std::filesystem::path sanityPath = std::filesystem::canonical(file_path, error);
 	if (error) {
@@ -86,6 +94,7 @@ void CxbxResolveHostToFullPath(std::filesystem::path& file_path, std::string_vie
 		}
 	}
 	file_path = sanityPath;
+#endif
 }
 // TODO: Eventually, we should remove this function to start using std::filesystem::path method for all host paths.
 void CxbxResolveHostToFullPath(std::string& file_path, std::string_view finish_error_sentence) {

@@ -44,4 +44,10 @@ extern void FreeAddressRanges(const unsigned int system, unsigned int release_sy
 
 extern bool AttemptReserveAddressRanges(unsigned int* p_reserved_systems, blocks_reserved_t blocks_reserved);
 
+// Details from the last mandatory reservation failure. This lets embedded
+// hosts report the actual AppContainer error instead of a generic failure.
+extern uint32_t GetLastAddressReservationBase();
+extern uint32_t GetLastAddressReservationSize();
+extern unsigned long GetLastAddressReservationError();
+
 extern bool isSystemFlagSupport(unsigned int reserved_systems, unsigned int assign_system);

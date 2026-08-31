@@ -96,7 +96,13 @@ cxbx_UWP_HostMain::cxbx_UWP_HostMain(const std::shared_ptr<DX::DeviceResources>&
 	m_localDataPath = WideToUtf8(localFolder->Path);
 	m_cachePath = WideToUtf8(cacheFolder->Path);
 	const std::filesystem::path logPath(localFolder->Path->Data());
-	m_logFile.open(logPath / L"cxbx-host.log", std::ios::binary | std::ios::app);
+	m_logFile.open(logPath / L"cxbx-host.log", std::ios::binary | std::ios::trunc);
+	if (m_logFile.is_open()) {
+		// Make the encoding unambiguous to Notepad and Windows PowerShell, and
+		// discard mojibake left by builds compiled without /utf-8.
+		static constexpr unsigned char utf8Bom[] = { 0xEF, 0xBB, 0xBF };
+		m_logFile.write(reinterpret_cast<const char*>(utf8Bom), sizeof(utf8Bom));
+	}
 	AppendLogLine(L"=== cxbx-UWP-Host iniciado ===");
 }
 

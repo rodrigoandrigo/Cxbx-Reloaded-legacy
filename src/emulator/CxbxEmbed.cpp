@@ -1,6 +1,7 @@
 #include "CxbxEmbed.h"
 
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -99,7 +100,12 @@ void LaunchWorker(CxbxEmbedInstance* instance)
 		}
 
 		if (!AttemptReserveAddressRanges(&reservedSystems, blocksReserved)) {
-			ReportFailure(instance, CXBX_EMBED_LAUNCH_FAILED, "Unable to reserve the Xbox address ranges.");
+			char message[192]{};
+			std::snprintf(message, sizeof(message),
+				"Unable to reserve Xbox address range 0x%08X (size 0x%08X, Win32 error %lu).",
+				GetLastAddressReservationBase(), GetLastAddressReservationSize(),
+				GetLastAddressReservationError());
+			ReportFailure(instance, CXBX_EMBED_LAUNCH_FAILED, message);
 			return;
 		}
 		CxbxCpuBackendConfigure(instance->cpuBackendModule.empty() ? nullptr :
@@ -146,7 +152,10 @@ extern "C" CxbxEmbedResult CXBX_EMBED_CALL CxbxEmbed_Create(
 	auto* created = new CxbxEmbedInstance();
 	created->config = *config;
 	created->callbacks = *callbacks;
-	created->titlePath = config->title_path_utf8;
+	// A brokered StorageFile intentionally has no process-visible path. Do not
+	// pass its null path through std::string::operator=(const char*); the title
+	// is materialized by LaunchWorker through the storage callbacks instead.
+	created->titlePath = config->title_path_utf8 ? config->title_path_utf8 : "";
 	created->localDataPath = config->local_data_path_utf8 ? config->local_data_path_utf8 : "";
 	created->cachePath = config->cache_path_utf8 ? config->cache_path_utf8 : "";
 	created->cpuBackendModule = config->cpu_backend_module_utf8 ?

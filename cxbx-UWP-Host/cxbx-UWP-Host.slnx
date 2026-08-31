@@ -4,7 +4,7 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="cxbx-UWP-Host.vcxproj">
+  <Project Path="cxbx-UWP-Host.vcxproj" Id="43b030bc-6394-47ca-8084-a2a972adbed2">
     <Deploy />
   </Project>
 </Solution>

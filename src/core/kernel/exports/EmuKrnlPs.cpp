@@ -44,6 +44,7 @@
 #include "core\kernel\support\Emu.h" // For EmuLog(LOG_LEVEL::WARNING, )
 #include "core\kernel\support\EmuFS.h" // For EmuGenerateFS
 #include "core\kernel\support\NativeHandle.h"
+#include "devices\x86\EmuX86.h"
 
 // prevent name collisions
 namespace NtDll
@@ -64,6 +65,10 @@ PCSTProxyParam;
 static xbox::PCREATE_THREAD_NOTIFY_ROUTINE g_pfnThreadNotification[PSP_MAX_CREATE_THREAD_NOTIFY] = { xbox::zeroptr };
 static std::atomic_int g_iThreadNotificationCount = 0;
 static std::mutex g_ThreadNotificationMtx;
+
+static xbox::void_xt NTAPI PspSystemThreadStartup(
+	IN xbox::PKSTART_ROUTINE StartRoutine,
+	IN PVOID StartContext);
 
 // Separate function for logging, otherwise in PCSTProxy __try wont work (Compiler Error C2712)
 void LOG_PCSTProxy
@@ -126,7 +131,29 @@ static unsigned int WINAPI PCSTProxy
 	xbox::KiExecuteKernelApc();
 
 #if defined(CXBXR_UWP)
-	CxbxrAbort("Xbox system-thread execution requires the packaged QEMU/TCG per-thread runner");
+	const uint32_t systemRoutine = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(StartFrame->SystemRoutine));
+	const uint32_t startupProxy = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(&PspSystemThreadStartup));
+	const uint32_t guestSystemRoutine = systemRoutine == startupProxy ? 0 : systemRoutine;
+	const uint32_t startRoutine = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(StartFrame->StartRoutine));
+	const uint32_t startContext = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(StartFrame->StartContext));
+	const uint32_t stackPointer = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(eThread->Tcb.KernelStack));
+	const uint32_t fsBase = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
+	uint32_t exceptionVector = 0;
+	if (!EmuX86_RunThread(guestSystemRoutine, startRoutine, startContext,
+		stackPointer, fsBase, &exceptionVector)) {
+		EmuLog(LOG_LEVEL::ERROR2,
+			"TCG system thread failed (start=0x%08X, exception=%u)",
+			startRoutine, exceptionVector);
+	}
+
+	LOG_TEST_CASE("Thread returned from QEMU/TCG SystemRoutine");
+	xbox::PsTerminateSystemThread(X_STATUS_SUCCESS);
 	return 0;
 #else
 	auto routine = (xbox::PKSYSTEM_ROUTINE)StartFrame->SystemRoutine;
@@ -157,7 +184,21 @@ xbox::void_xt NTAPI PspSystemThreadStartup
 {
 	// TODO : Call PspUnhandledExceptionInSystemThread(GetExceptionInformation())
 #if defined(CXBXR_UWP)
-	CxbxrAbort("PspSystemThreadStartup must execute through the QEMU/TCG guest runner");
+	const auto eThread = xbox::PspGetCurrentThread();
+	const uint32_t startRoutine = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(StartRoutine));
+	const uint32_t startContext = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(StartContext));
+	const uint32_t stackPointer = eThread ? static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(eThread->Tcb.KernelStack)) : 0;
+	const uint32_t fsBase = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
+	if (!stackPointer || !EmuX86_RunThread(0, startRoutine, startContext,
+		stackPointer, fsBase)) {
+		EmuLog(LOG_LEVEL::ERROR2,
+			"TCG PspSystemThreadStartup failed (start=0x%08X)", startRoutine);
+	}
+	xbox::PsTerminateSystemThread(X_STATUS_SUCCESS);
 #else
 	(StartRoutine)(StartContext);
 

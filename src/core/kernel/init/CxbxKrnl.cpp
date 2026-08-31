@@ -882,8 +882,20 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	// NOTE: This is designated for standalone kernel mode launch without GUI
 	if (g_Settings != nullptr) {
 
+		#if defined(CXBXR_UWP)
+		// EmuShared::Reset clears the host-brokered ApplicationData path. Keep it
+		// across the legacy GUI-state reset so Settings::SyncToEmulator never
+		// republishes an empty data directory inside the AppContainer.
+		char embeddedDataLocation[MAX_PATH]{};
+		g_EmuShared->GetDataLocation(embeddedDataLocation);
+		#endif
+
 		// Reset to default
 		g_EmuShared->Reset();
+
+		#if defined(CXBXR_UWP)
+		g_EmuShared->SetDataLocation(embeddedDataLocation);
+		#endif
 
 		g_Settings->Verify();
 		g_Settings->SyncToEmulator();
