@@ -71,7 +71,7 @@ uint64_t Muldiv64(uint64_t a, uint32_t b, uint32_t c)
    	const uint64_t rl = static_cast<uint64_t>(a_low)  * b;
    	const uint64_t rh = static_cast<uint64_t>(a_high) * b + (rl >> 32);
 
-	assert(rh / c <= (std::numeric_limits<uint32_t>::max)());
+   	assert(rh / c <= std::numeric_limits<uint32_t>::max());
 
    	const uint32_t res_high = static_cast<uint32_t>(rh / c);
    	const uint32_t res_low  = static_cast<uint32_t>(((rh % c) << 32 | (rl & 0xFFFF'FFFFu)) / c);

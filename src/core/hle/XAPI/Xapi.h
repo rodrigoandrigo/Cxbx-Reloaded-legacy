@@ -676,6 +676,7 @@ xbox::void_xt WINAPI EMUPATCH(XSetProcessQuantumLength)
     dword_xt dwMilliseconds
 );
 
+#if 0 // Unpatched: game's original code calls NtSignalAndWaitForSingleObjectEx which is fully implemented
 // ******************************************************************
 // * patch: SignalObjectAndWait
 // ******************************************************************
@@ -686,7 +687,12 @@ xbox::dword_xt WINAPI EMUPATCH(SignalObjectAndWait)
 	dword_xt	dwMilliseconds,
 	bool_xt	bAlertable
 );
+#endif
 
+#if !defined(CXBXR_UWP)
+// These legacy multimedia-timer patches are not registered in Patches.cpp.
+// Keeping their declarations out of the UWP build also avoids importing winmm.
+// A future UWP implementation must use a host scheduler rather than timeSetEvent.
 // ******************************************************************
 // * patch: timeSetEvent
 // ******************************************************************
@@ -704,8 +710,9 @@ MMRESULT WINAPI EMUPATCH(timeSetEvent)
 // ******************************************************************
 MMRESULT WINAPI EMUPATCH(timeKillEvent)
 (
-	uint_xt uTimerID  
+	uint_xt uTimerID
 );
+#endif
 
 // ******************************************************************
 // * patch: RaiseException
@@ -821,6 +828,7 @@ xbox::bool_xt WINAPI EMUPATCH(WriteFileEx)
 	LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine // completion routine
 );
 
+#if 0 // Unpatched: game's original code calls DbgPrint which is fully implemented
 // ******************************************************************
 // * patch: OutputDebugStringA
 // ******************************************************************
@@ -828,6 +836,7 @@ xbox::void_xt WINAPI EMUPATCH(OutputDebugStringA)
 (
 	IN LPCSTR lpOutputString
 );
+#endif
 
 // s+
 /* not necessary?

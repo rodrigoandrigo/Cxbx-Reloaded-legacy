@@ -29,7 +29,7 @@ typedef const char* (CDECL* LPFN_WINEGETVERSION)(void);
 LPFN_WINEGETVERSION wine_get_version;
 
 static bool CheckForWine() {
-	HMODULE hNtDll = GetModuleHandle("ntdll.dll");
+	HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
 	if (hNtDll != nullptr) {
 		wine_get_version = (LPFN_WINEGETVERSION)GetProcAddress(hNtDll, "wine_get_version");
 		// If wine is found, store pointer to the function for later call.

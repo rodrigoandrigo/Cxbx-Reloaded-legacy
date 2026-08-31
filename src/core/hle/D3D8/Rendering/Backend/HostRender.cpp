@@ -26,6 +26,7 @@
 #include <dxgi1_5.h> // IDXGIFactory5, DXGI_FEATURE_PRESENT_ALLOW_TEARING
 #include "Backend_D3D11_PageTracker.h"
 #include "devices\video\nv2a.h" // NV2AState
+#include "common/CxbxEmbedRuntime.h"
 
 
 /* Unused :
@@ -160,6 +161,7 @@ static void CreateD3D11DeviceWithFallbacks(UINT creationFlags)
 }
 
 // ---- Helper: Create a DXGI swap chain using the HWND (Win32 window) for the emulator window ----
+#if !defined(CXBXR_UWP)
 static void CreateSwapChainForWindow()
 {
 	LOG_INIT;
@@ -237,14 +239,39 @@ static void CreateSwapChainForWindow()
 	// the Present-blocks-every-frame bottleneck of latency=1.)
 	dxgiDevice->SetMaximumFrameLatency(2);
 }
+#endif
+
+#if defined(CXBXR_UWP)
+static void AdoptHostD3D11Device()
+{
+	const auto* presentation = CxbxEmbedRuntimeGetD3D11Presentation();
+	if (!presentation || !presentation->d3d11_device || !presentation->d3d11_context || !presentation->render_target) {
+		CxbxrAbort("UWP embedding requires a D3D11 device, context and render target from the host.");
+	}
+
+	g_pD3DDevice = static_cast<ID3D11Device*>(presentation->d3d11_device);
+	g_pD3DDeviceContext = static_cast<ID3D11DeviceContext*>(presentation->d3d11_context);
+	g_pD3DDevice->AddRef();
+	g_pD3DDeviceContext->AddRef();
+}
+#endif
 
 // ---- Helper: Set up back buffer, depth stencil, and default render target ----
 static void SetupBackBufferAndDepthStencil()
 {
 	LOG_INIT;
 	ComPtr<ID3D11Texture2D> backBuffer;
-	HRESULT hr = g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(backBuffer.GetAddressOf()));
+	HRESULT hr = S_OK;
+#if defined(CXBXR_UWP)
+	const auto* presentation = CxbxEmbedRuntimeGetD3D11Presentation();
+	if (!presentation || !presentation->render_target) {
+		CxbxrAbort("UWP embedding lost its host render target.");
+	}
+	backBuffer = static_cast<ID3D11Texture2D*>(presentation->render_target);
+#else
+	hr = g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(backBuffer.GetAddressOf()));
 	DEBUG_D3DRESULT(hr, "IDXGISwapChain::GetBuffer");
+#endif
 
 	// Create a render target view on the back buffer.
 	hr = g_pD3DDevice->CreateRenderTargetView(backBuffer.Get(), nullptr, &g_pD3DBackBufferView);
@@ -354,16 +381,31 @@ void CreateDefaultDevice
    	   	ClearAllResourceCaches();
   	   	// TODO: ensure all other resources are cleaned up too
 
-   	   	// Final release of IDirect3DDevice9 must be called from the window message thread
-   	   	// See https://docs.microsoft.com/en-us/windows/win32/direct3d9/multithreading-issues
-   	   	RunOnWndMsgThread([] {
-   	   	   	// We only need to call bundled device release once here.
-   	   	   	g_renderbase->DeviceRelease();
-   	   	});
+#if defined(CXBXR_UWP)
+		CxbxD3D11ReleaseBackendResources();
+		if (g_pD3DDepthStencilView) { g_pD3DDepthStencilView->Release(); g_pD3DDepthStencilView = nullptr; }
+		if (g_pD3DDepthStencilBuffer) { g_pD3DDepthStencilBuffer->Release(); g_pD3DDepthStencilBuffer = nullptr; }
+		g_pD3DCurrentRTV = nullptr;
+		if (g_pD3DBackBufferView) { g_pD3DBackBufferView->Release(); g_pD3DBackBufferView = nullptr; }
+		if (g_pD3DBackBufferSurface) { g_pD3DBackBufferSurface->Release(); g_pD3DBackBufferSurface = nullptr; }
+		if (g_pD3DDeviceContext) { g_pD3DDeviceContext->Release(); g_pD3DDeviceContext = nullptr; }
+		g_pD3DDevice->Release();
+		g_pD3DDevice = nullptr;
+#else
+		// Final release must run on the desktop render-window message thread.
+		RunOnWndMsgThread([] {
+			g_renderbase->DeviceRelease();
+		});
+#endif
    	}
 
-	// Apply render scale factor for high-resolution rendering
-   	g_RenderUpscaleFactor = g_XBVideo.renderScaleFactor;
+	// Apply render scale factor for high-resolution rendering. The UWP host
+	// owns output sizing, so the core starts at native scale.
+#if defined(CXBXR_UWP)
+	g_RenderUpscaleFactor = 1;
+#else
+	g_RenderUpscaleFactor = g_XBVideo.renderScaleFactor;
+#endif
 
 	// Setup the HostPresentationParameters
    	SetupPresentationParameters(pPresentationParameters);
@@ -377,8 +419,13 @@ void CreateDefaultDevice
 	creationFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
 
+#if defined(CXBXR_UWP)
+	(void)creationFlags;
+	AdoptHostD3D11Device();
+#else
 	CreateD3D11DeviceWithFallbacks(creationFlags);
 	CreateSwapChainForWindow();
+#endif
 	SetupBackBufferAndDepthStencil();
 	InitializeDefaultPipelineState();
 
@@ -440,7 +487,8 @@ void CreateDefaultDevice
 
    	DrawInitialBlackScreen();
 
-   	// Set up ImGui's render backend
+	// Set up ImGui's render backend
+#if !defined(CXBXR_UWP)
 	ImGui_ImplDX11_Init(g_pD3DDevice, g_pD3DDeviceContext);
 	CxbxD3D11InitBlit();
    	g_renderbase->SetDeviceRelease([] {
@@ -454,8 +502,11 @@ void CreateDefaultDevice
    	   	if (g_pD3DBackBufferSurface) { g_pD3DBackBufferSurface->Release(); g_pD3DBackBufferSurface = nullptr; }
    	   	if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
    	   	if (g_pD3DDeviceContext) { g_pD3DDeviceContext->Release(); g_pD3DDeviceContext = nullptr; }
-   	   	g_pD3DDevice->Release();
-   	});
+		g_pD3DDevice->Release();
+	});
+#else
+	CxbxD3D11InitBlit();
+#endif
 }
 
 
@@ -1233,14 +1284,28 @@ HRESULT CxbxPresent()
 	CxbxEndScene();
 
 	// Apply NV2A gamma LUT (PRMDIO VGA DAC palette) to DXGI output
+	// The UWP host owns the display output and therefore its gamma policy.
+#if !defined(CXBXR_UWP)
 	NV2AState* d = g_NV2A->GetDeviceState();
 	if (d->puserdac.dirty) {
 		d->puserdac.dirty = false;
 		CxbxApplyNV2AGamma(d);
 	}
+#endif
 
+	HRESULT hRet = S_OK;
+#if defined(CXBXR_UWP)
+	g_pD3DDeviceContext->Flush();
+	const auto* presentation = CxbxEmbedRuntimeGetD3D11Presentation();
+	if (!presentation || !presentation->present) {
+		return E_FAIL;
+	}
+	presentation->present(presentation->user_data, g_pD3DBackBufferSurface,
+		g_HostBackBufferDesc.Width, g_HostBackBufferDesc.Height);
+#else
 	HRESULT hRet = g_pSwapChain->Present(0, g_bTearingSupported ? DXGI_PRESENT_ALLOW_TEARING : 0);
 	DEBUG_D3DRESULT(hRet, "g_pSwapChain->Present");
+#endif
 	EmuPresentTick();
 	// Allow the next page tracker flush to use DISCARD (safe at frame boundary
 	// since no draw calls from this frame are still referencing the buffer)
@@ -1251,6 +1316,17 @@ HRESULT CxbxPresent()
 
 HRESULT CxbxGetBackBuffer(ID3D11Texture2D** ppBackBuffer)
 {
+	if (!ppBackBuffer) {
+		return E_INVALIDARG;
+	}
+#if defined(CXBXR_UWP)
+	if (!g_pD3DBackBufferSurface) {
+		return E_FAIL;
+	}
+	g_pD3DBackBufferSurface->AddRef();
+	*ppBackBuffer = g_pD3DBackBufferSurface;
+	return S_OK;
+#else
 	return g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(ppBackBuffer));
+#endif
 }
-

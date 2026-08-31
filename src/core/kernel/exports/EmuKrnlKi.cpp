@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -87,8 +87,11 @@ the said software).
 #include "EmuKrnl.h" // for the list support functions
 #include "EmuKrnlKi.h"
 #include "EmuKrnlKe.h"
+#include <unordered_map>
 
-#define MAX_TIMER_DPCS   16
+#define MAX_TIMER_DPCS          16
+#define TIMER_SCAN_LIMIT        24  // Max timers to inspect per table slot before yielding
+#define ACTIVE_TIMER_LIMIT       4  // Max expired timers to process per batch before yielding
 
 #define ASSERT_TIMER_LOCKED assert(KiTimerMtx.Acquired > 0)
 #define ASSERT_WAIT_LIST_LOCKED assert(KiWaitListMtx.Acquired > 0)
@@ -98,10 +101,67 @@ const xbox::ulong_xt CLOCK_TIME_INCREMENT = 0x2710;
 xbox::KDPC KiTimerExpireDpc;
 xbox::KI_TIMER_LOCK KiTimerMtx;
 xbox::KI_WAIT_LIST_LOCK KiWaitListMtx;
+
+// Per-thread host wake event map.  Keyed by PKTHREAD, value is an
+// auto-reset Win32 event.  Signaled by KiUnwaitThread / KiInsertQueueApc
+// to replace the old SleepEx(1) polling with instant wakeups.
+static std::shared_mutex g_WakeEventMtx;
+static std::unordered_map<xbox::PKTHREAD, HANDLE> g_ThreadWakeEvents;
+
+void CxbxRegisterThreadWakeEvent(xbox::PKTHREAD Thread)
+{
+	HANDLE hEvent = CreateEventW(NULL, FALSE /*auto-reset*/, FALSE, NULL);
+	std::unique_lock lck(g_WakeEventMtx);
+	g_ThreadWakeEvents[Thread] = hEvent;
+}
+
+void CxbxUnregisterThreadWakeEvent(xbox::PKTHREAD Thread)
+{
+	std::unique_lock lck(g_WakeEventMtx);
+	auto it = g_ThreadWakeEvents.find(Thread);
+	if (it != g_ThreadWakeEvents.end()) {
+		CloseHandle(it->second);
+		g_ThreadWakeEvents.erase(it);
+	}
+}
+
+void* CxbxGetThreadWakeEvent(xbox::PKTHREAD Thread)
+{
+	std::shared_lock lck(g_WakeEventMtx);
+	auto it = g_ThreadWakeEvents.find(Thread);
+	return (it != g_ThreadWakeEvents.end()) ? it->second : nullptr;
+}
+
+void CxbxSignalThreadWakeEvent(xbox::PKTHREAD Thread)
+{
+	HANDLE hEvent = CxbxGetThreadWakeEvent(Thread);
+	if (hEvent) {
+		SetEvent(hEvent);
+	}
+}
 xbox::KTIMER_TABLE_ENTRY KiTimerTableListHead[TIMER_TABLE_SIZE];
 xbox::LIST_ENTRY KiWaitInListHead;
 std::mutex xbox::KiApcListMtx;
 
+
+// Invoke all buffered timer DPC entries and reset the call count to zero.
+template<typename UInt, typename ULargeInt>
+static void KiFlushDpcBuffer(
+	xbox::DPC_QUEUE_ENTRY *DpcEntry,
+	UInt &DpcCalls,
+	const ULargeInt &SystemTime
+)
+{
+	for (UInt d = 0; DpcCalls; DpcCalls--, d++)
+	{
+		DpcEntry[d].Routine(
+			DpcEntry[d].Dpc,
+			DpcEntry[d].Context,
+			UlongToPtr(SystemTime.u.LowPart),
+			UlongToPtr(SystemTime.u.HighPart)
+		);
+	}
+}
 
 xbox::void_xt xbox::KiInitSystem()
 {
@@ -561,7 +621,6 @@ xbox::void_xt NTAPI xbox::KiTimerExpiration
 {
 	ULARGE_INTEGER SystemTime, InterruptTime;
 	LARGE_INTEGER Interval;
-	LONG i;
 	ULONG Timers, ActiveTimers, DpcCalls;
 	PLIST_ENTRY ListHead, NextEntry;
 	KIRQL OldIrql;
@@ -575,13 +634,13 @@ xbox::void_xt NTAPI xbox::KiTimerExpiration
 	InterruptTime.QuadPart = KeQueryInterruptTime();
 
 	/* Get the index of the timer and normalize it */
-	dword_xt OldKeTickCount = PtrToLong(SystemArgument1);
-	dword_xt EndKeTickCount = PtrToLong(SystemArgument2);
+	dword_xt OldKeTickCount = PtrToUlong(SystemArgument1);
+	dword_xt EndKeTickCount = PtrToUlong(SystemArgument2);
 
 	/* Setup accounting data */
 	DpcCalls = 0;
-	Timers = 24;
-	ActiveTimers = 4;
+	Timers = TIMER_SCAN_LIMIT;
+	ActiveTimers = ACTIVE_TIMER_LIMIT;
 
 	/* Lock the Database */
 	KiTimerLock();
@@ -639,38 +698,33 @@ xbox::void_xt NTAPI xbox::KiTimerExpiration
 				/* Check if we have a DPC */
 				if (TimerDpc)
 				{
+					/* If the buffer is full, flush it before adding */
+					if (DpcCalls >= MAX_TIMER_DPCS) {
+						KiUnlockDispatcherDatabase(DISPATCH_LEVEL);
+						KiFlushDpcBuffer(DpcEntry, DpcCalls, SystemTime);
+
+						Timers = TIMER_SCAN_LIMIT;
+						ActiveTimers = ACTIVE_TIMER_LIMIT;
+						KiLockDispatcherDatabaseAtDpcLevel();
+					}
+
 					/* Setup the DPC Entry */
 					DpcEntry[DpcCalls].Dpc = TimerDpc;
 					DpcEntry[DpcCalls].Routine = TimerDpc->DeferredRoutine;
 					DpcEntry[DpcCalls].Context = TimerDpc->DeferredContext;
 					DpcCalls++;
-					assert(DpcCalls < MAX_TIMER_DPCS);
 				}
 
 				/* Check if we're done processing */
-				if (!(ActiveTimers) || !(Timers))
+				if (!(ActiveTimers) || !(Timers) || (DpcCalls >= MAX_TIMER_DPCS))
 				{
 					/* Release the dispatcher while doing DPCs */
 					KiUnlockDispatcherDatabase(DISPATCH_LEVEL);
-
-					/* Start looping all DPC Entries */
-					for (i = 0; DpcCalls; DpcCalls--, i++)
-					{
-						/* Call the DPC */
-						EmuLog(LOG_LEVEL::DEBUG, "%s, calling DPC at 0x%.8X", __func__, DpcEntry[i].Routine);
-
-						// Call the Deferred Procedure  :
-						DpcEntry[i].Routine(
-							DpcEntry[i].Dpc,
-							DpcEntry[i].Context,
-							UlongToPtr(SystemTime.u.LowPart),
-							UlongToPtr(SystemTime.u.HighPart)
-						);
-					}
+					KiFlushDpcBuffer(DpcEntry, DpcCalls, SystemTime);
 
 					/* Reset accounting */
-					Timers = 24;
-					ActiveTimers = 4;
+					Timers = TIMER_SCAN_LIMIT;
+					ActiveTimers = ACTIVE_TIMER_LIMIT;
 
 					/* Lock the dispatcher database */
 					KiLockDispatcherDatabaseAtDpcLevel();
@@ -695,25 +749,11 @@ xbox::void_xt NTAPI xbox::KiTimerExpiration
 				{
 					/* Release the dispatcher while doing DPCs */
 					KiUnlockDispatcherDatabase(DISPATCH_LEVEL);
-
-					/* Start looping all DPC Entries */
-					for (i = 0; DpcCalls; DpcCalls--, i++)
-					{
-						/* Call the DPC */
-						EmuLog(LOG_LEVEL::DEBUG, "%s, calling DPC at 0x%.8X", __func__, DpcEntry[i].Routine);
-
-						// Call the Deferred Procedure  :
-						DpcEntry[i].Routine(
-							DpcEntry[i].Dpc,
-							DpcEntry[i].Context,
-							UlongToPtr(SystemTime.u.LowPart),
-							UlongToPtr(SystemTime.u.HighPart)
-						);
-					}
+					KiFlushDpcBuffer(DpcEntry, DpcCalls, SystemTime);
 
 					/* Reset accounting */
-					Timers = 24;
-					ActiveTimers = 4;
+					Timers = TIMER_SCAN_LIMIT;
+					ActiveTimers = ACTIVE_TIMER_LIMIT;
 
 					/* Lock the dispatcher database */
 					KiLockDispatcherDatabaseAtDpcLevel();
@@ -735,21 +775,7 @@ xbox::void_xt NTAPI xbox::KiTimerExpiration
 	{
 		/* Release the dispatcher while doing DPCs */
 		KiUnlockDispatcherDatabase(DISPATCH_LEVEL);
-
-		/* Start looping all DPC Entries */
-		for (i = 0; DpcCalls; DpcCalls--, i++)
-		{
-			/* Call the DPC */
-			EmuLog(LOG_LEVEL::DEBUG, "%s, calling DPC at 0x%.8X", __func__, DpcEntry[i].Routine);
-
-			// Call the Deferred Procedure  :
-			DpcEntry[i].Routine(
-				DpcEntry[i].Dpc,
-				DpcEntry[i].Context,
-				UlongToPtr(SystemTime.u.LowPart),
-				UlongToPtr(SystemTime.u.HighPart)
-			);
-		}
+		KiFlushDpcBuffer(DpcEntry, DpcCalls, SystemTime);
 
 		KiTimerUnlock();
 		/* Lower IRQL if we need to */
@@ -773,7 +799,6 @@ xbox::void_xt FASTCALL xbox::KiTimerListExpire
 {
 	ULARGE_INTEGER SystemTime;
 	LARGE_INTEGER Interval;
-	LONG i;
 	ULONG DpcCalls = 0;
 	PKTIMER Timer;
 	PKDPC TimerDpc;
@@ -826,11 +851,12 @@ xbox::void_xt FASTCALL xbox::KiTimerListExpire
 		if (TimerDpc)
 		{
 			/* Setup the DPC Entry */
-			DpcEntry[DpcCalls].Dpc = TimerDpc;
-			DpcEntry[DpcCalls].Routine = TimerDpc->DeferredRoutine;
-			DpcEntry[DpcCalls].Context = TimerDpc->DeferredContext;
-			DpcCalls++;
-			assert(DpcCalls < MAX_TIMER_DPCS);
+			if (DpcCalls < MAX_TIMER_DPCS) {
+				DpcEntry[DpcCalls].Dpc = TimerDpc;
+				DpcEntry[DpcCalls].Routine = TimerDpc->DeferredRoutine;
+				DpcEntry[DpcCalls].Context = TimerDpc->DeferredContext;
+				DpcCalls++;
+			}
 		}
 	}
 
@@ -841,21 +867,7 @@ xbox::void_xt FASTCALL xbox::KiTimerListExpire
 	{
 		/* Release the dispatcher while doing DPCs */
 		KiUnlockDispatcherDatabase(DISPATCH_LEVEL);
-
-		/* Start looping all DPC Entries */
-		for (i = 0; DpcCalls; DpcCalls--, i++)
-		{
-			/* Call the DPC */
-			EmuLog(LOG_LEVEL::DEBUG, "%s, calling DPC at 0x%.8X", __func__, DpcEntry[i].Routine);
-
-			// Call the Deferred Procedure  :
-			DpcEntry[i].Routine(
-				DpcEntry[i].Dpc,
-				DpcEntry[i].Context,
-				UlongToPtr(SystemTime.u.LowPart),
-				UlongToPtr(SystemTime.u.HighPart)
-			);
-		}
+		KiFlushDpcBuffer(DpcEntry, DpcCalls, SystemTime);
 
 		/* Lower IRQL */
 		KfLowerIrql(OldIrql);
@@ -892,11 +904,20 @@ static xbox::void_xt KiExecuteApc()
 		Apc->Inserted = FALSE;
 		xbox::KiApcListMtx.unlock();
 
-		// This is either KiFreeUserApc, which frees the memory of the apc, or KiSuspendNop, which does nothing
-		(Apc->KernelRoutine)(Apc, &Apc->NormalRoutine, &Apc->NormalContext, &Apc->SystemArgument1, &Apc->SystemArgument2);
+		// Save fields BEFORE calling KernelRoutine — for user APCs, the
+		// KernelRoutine is KiFreeUserApc which calls ExFreePool(Apc),
+		// making any subsequent access to the APC struct use-after-free.
+		// The KernelRoutine may modify NormalRoutine/NormalContext through
+		// the output pointers, so we pass local copies.
+		xbox::PKNORMAL_ROUTINE NormalRoutine = Apc->NormalRoutine;
+		xbox::PVOID NormalContext = Apc->NormalContext;
+		xbox::PVOID SystemArgument1 = Apc->SystemArgument1;
+		xbox::PVOID SystemArgument2 = Apc->SystemArgument2;
 
-		if (Apc->NormalRoutine != xbox::zeroptr) {
-			(Apc->NormalRoutine)(Apc->NormalContext, Apc->SystemArgument1, Apc->SystemArgument2);
+		(Apc->KernelRoutine)(Apc, &NormalRoutine, &NormalContext, &SystemArgument1, &SystemArgument2);
+
+		if (NormalRoutine != xbox::zeroptr) {
+			(NormalRoutine)(NormalContext, SystemArgument1, SystemArgument2);
 		}
 
 		xbox::KiApcListMtx.lock();
@@ -1070,7 +1091,7 @@ xbox::void_xt xbox::KiInitializeContextThread(
 
 	/* And set up the Context Switch Frame */
 	CtxSwitchFrame->RetAddr = KiThreadStartup;
-	CtxSwitchFrame->Unknown = 0x200; // TODO: Find out what this field is.
+	CtxSwitchFrame->Eflags = 0x200; // IF (Interrupt Flag) enabled
 	CtxSwitchFrame->ExceptionList = reinterpret_cast<PVOID>(X_EXCEPTION_CHAIN_END);
 
 	/* Save back the new value of the kernel stack. */
@@ -1091,17 +1112,22 @@ xbox::boolean_xt xbox::KiInsertQueueApc
 	}
 	InsertTailList(&kThread->ApcState.ApcListHead[Apc->ApcMode], &Apc->ApcListEntry);
 	Apc->Inserted = TRUE;
+	// Save ApcMode before unlocking — after unlock, the target thread could
+	// immediately execute and free this APC (for user APCs via KiFreeUserApc).
+	auto ApcMode = Apc->ApcMode;
 	KiApcListMtx.unlock();
 
 	// We can only attempt to execute the queued apc right away if it is been inserted in the current thread, because otherwise the KTHREAD
 	// in the fs selector will not be correct
-	if (Apc->ApcMode == KernelMode) { // kernel apc
+	if (ApcMode == KernelMode) { // kernel apc
 		kThread->ApcState.KernelApcPending = TRUE;
 		// NOTE: this is wrong, we should check the thread state instead of just signaling the kernel apc, but we currently
 		// don't set the appropriate state in kthread
 		if (kThread == KeGetCurrentThread()) {
 			KiExecuteKernelApc();
 		}
+		// Wake the target thread so it can process the APC
+		CxbxSignalThreadWakeEvent(kThread);
 	}
 	else if ((kThread->WaitMode == UserMode) && (kThread->Alertable)) { // user apc
 		kThread->ApcState.UserApcPending = TRUE;
@@ -1109,6 +1135,8 @@ xbox::boolean_xt xbox::KiInsertQueueApc
 		if (kThread == KeGetCurrentThread()) {
 			KiExecuteUserApc();
 		}
+		// Wake the target thread so it can process the APC
+		CxbxSignalThreadWakeEvent(kThread);
 	}
 
 	return TRUE;
@@ -1131,6 +1159,12 @@ xbox::void_xt xbox::KiWaitTest
 	WaitList = &FirstObject->Header.WaitListHead;
 	WaitEntry = WaitList->Flink;
 	while ((FirstObject->Header.SignalState > 0) && (WaitEntry != WaitList)) {
+		/* Save the next entry BEFORE KiUnwaitThread may free this entry's memory.
+		 * KiUnwaitThread wakes the target thread, which can immediately return
+		 * from KeWaitForSingleObject and destroy its stack-allocated WaitBlock,
+		 * making WaitEntry->Flink a use-after-free. */
+		PLIST_ENTRY NextEntry = WaitEntry->Flink;
+
 		/* Get the current wait block */
 		WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 		WaitThread = WaitBlock->Thread;
@@ -1162,7 +1196,7 @@ xbox::void_xt xbox::KiWaitTest
 		/* Now do the rest of the unwait */
 		KiUnwaitThread(WaitThread, WaitBlock->WaitKey, Increment);
 NextWaitEntry:
-		WaitEntry = WaitEntry->Flink;
+		WaitEntry = NextEntry;
 	}
 	KiWaitListUnlock();
 }
@@ -1219,6 +1253,9 @@ xbox::void_xt xbox::KiUnwaitThread
 
 	// We cannot schedule the thread, so we'll just set its state to Ready
 	Thread->State = Ready;
+
+	// Signal the thread's host wake event so WaitApc unblocks immediately
+	CxbxSignalThreadWakeEvent(Thread);
 }
 
 xbox::void_xt xbox::KiUnwaitThreadAndLock
@@ -1239,23 +1276,13 @@ xbox::void_xt xbox::KiUnlinkThread
 	IN long_ptr_xt WaitStatus
 )
 {
-	PKWAIT_BLOCK WaitBlock;
-	PKTIMER Timer;
-
 	ASSERT_WAIT_LIST_LOCKED;
 
 	/* Update wait status */
 	Thread->WaitStatus |= WaitStatus;
 
-	/* Remove the Wait Blocks from the list */
-	WaitBlock = Thread->WaitBlockList;
-	do {
-		/* Remove it */
-		RemoveEntryList(&WaitBlock->WaitListEntry);
-
-		/* Go to the next one */
-		WaitBlock = WaitBlock->NextWaitBlock;
-	} while (WaitBlock != Thread->WaitBlockList);
+	/* Remove the Wait Blocks from the list and clear WaitBlockList */
+	KiRemoveWaitBlocks(Thread);
 
 #if 0
 	// Disabled, as we currently don't put threads in the ready list
@@ -1266,19 +1293,71 @@ xbox::void_xt xbox::KiUnlinkThread
 #endif
 
 	/* Check if there's a Thread Timer */
-	Timer = &Thread->Timer;
-	if (Timer->Header.Inserted) {
-		KiTimerLock();
-		KxRemoveTreeTimer(Timer);
-		KiTimerUnlock();
-	}
+	KiCancelThreadTimer(Thread);
 
 	/* Increment the Queue's active threads */
 	if (Thread->Queue) {
 		((PRKQUEUE)Thread->Queue)->CurrentCount++;
 	}
+}
 
-	// Sanity check: set WaitBlockList to nullptr so that we can catch the case where a waiter starts a new wait but forgets to setup a new wait block. This
-	// way, we will crash instead of silently using the pointer to the old block
+// Remove all wait blocks from their respective dispatcher objects' wait lists
+// and clear Thread->WaitBlockList.  Must be called with KiWaitListLock held.
+// Does not acquire any locks internally.
+xbox::void_xt xbox::KiRemoveWaitBlocks
+(
+	IN PKTHREAD Thread
+)
+{
+	PKWAIT_BLOCK WaitBlock = Thread->WaitBlockList;
+	if (WaitBlock) {
+		PKWAIT_BLOCK FirstBlock = WaitBlock;
+		do {
+			RemoveEntryList(&WaitBlock->WaitListEntry);
+			WaitBlock = WaitBlock->NextWaitBlock;
+		} while (WaitBlock != FirstBlock);
+	}
+
 	Thread->WaitBlockList = zeroptr;
+}
+
+// Set up the thread's TimerWaitBlock as a single-entry circular list in the
+// thread timer's WaitListHead, and link it into the wait block chain.
+// LastWaitBlock->NextWaitBlock is set to point to the TimerWaitBlock, and
+// TimerWaitBlock->NextWaitBlock is set to FirstWaitBlock (closing the circle).
+xbox::void_xt xbox::KiSetupTimerWaitBlock
+(
+	IN PKTHREAD Thread,
+	IN PKWAIT_BLOCK LastWaitBlock,
+	IN PKWAIT_BLOCK FirstWaitBlock
+)
+{
+	PKTIMER Timer = &Thread->Timer;
+	PKWAIT_BLOCK WaitTimer = &Thread->TimerWaitBlock;
+	LastWaitBlock->NextWaitBlock = WaitTimer;
+	WaitTimer->NextWaitBlock = FirstWaitBlock;
+	Timer->Header.WaitListHead.Flink = &WaitTimer->WaitListEntry;
+	Timer->Header.WaitListHead.Blink = &WaitTimer->WaitListEntry;
+	WaitTimer->WaitListEntry.Flink = &Timer->Header.WaitListHead;
+	WaitTimer->WaitListEntry.Blink = &Timer->Header.WaitListHead;
+	WaitTimer->Thread = Thread;
+	WaitTimer->Object = Timer;
+	WaitTimer->WaitKey = (cshort_xt)X_STATUS_TIMEOUT;
+	WaitTimer->WaitType = WaitAny;
+}
+
+// Cancel the thread's pending timer, if any.  Acquires KiTimerLock internally.
+// Must NOT be called while holding KiWaitListLock (would invert the lock order
+// used by KiTimerExpiration: KiTimerLock → KiWaitListLock).
+xbox::void_xt xbox::KiCancelThreadTimer
+(
+	IN PKTHREAD Thread
+)
+{
+	PKTIMER Timer = &Thread->Timer;
+	if (Timer->Header.Inserted) {
+		KiTimerLock();
+		KxRemoveTreeTimer(Timer);
+		KiTimerUnlock();
+	}
 }

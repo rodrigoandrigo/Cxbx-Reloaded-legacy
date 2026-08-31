@@ -34,6 +34,11 @@
 
 // Source: https://stackoverflow.com/questions/8046097/how-to-check-if-a-process-has-the-administrative-rights
 bool CxbxrIsElevated() {
+#if defined(CXBXR_UWP)
+	// AppContainer processes cannot elevate. This is the definitive UWP state,
+	// not a missing implementation.
+	return false;
+#else
 	bool fRet = false;
 	HANDLE hToken = NULL;
 	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
@@ -47,9 +52,18 @@ bool CxbxrIsElevated() {
 		CloseHandle(hToken);
 	}
 	return fRet;
+#endif
 }
 
-std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess) {
+std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess, bool isReboot) {
+#if defined(CXBXR_UWP)
+	(void)useDebugger;
+	(void)hProcess;
+	(void)requestHandleProcess;
+	(void)isReboot;
+	return std::make_optional<std::string>(
+		"UWP runs the emulator through CxbxEmbed_Launch; AppContainer cannot create a desktop child process");
+#else
 
 	STARTUPINFO startupInfo = { 0 };
 	PROCESS_INFORMATION processInfo = { 0 };
@@ -76,6 +90,34 @@ std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool req
 	if (CreateProcess(nullptr, const_cast<LPSTR>(szProcArgsBuffer.c_str()), nullptr, nullptr, false, DETACHED_PROCESS, nullptr, nullptr, &startupInfo, &processInfo) == 0) {
 		return std::make_optional<std::string>("Failed to create the new emulation process. CreateProcess failed because: " + WinError2Str());
 	}
+
+	// Place the child process in a Job Object so that it is automatically
+	// terminated when cxbx.exe exits (for any reason: graceful close, crash,
+	// killed via Task Manager).  This is necessary because the render window
+	// uses WS_POPUP (owned) instead of WS_CHILD, so Windows no longer
+	// auto-destroys it when the parent window/process goes away.
+	// During reboot the child inherits the GUI's job via normal process
+	// inheritance, so we must not create a second job here (its
+	// KILL_ON_JOB_CLOSE would kill the child when this process exits).
+	if (!isReboot) {
+		static HANDLE s_hJob = NULL;
+		if (!s_hJob) {
+			s_hJob = CreateJobObject(NULL, NULL);
+			if (s_hJob) {
+				JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+				jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+				SetInformationJobObject(s_hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+			}
+		}
+		if (s_hJob) {
+			AssignProcessToJobObject(s_hJob, processInfo.hProcess);
+		}
+	}
+
+	// Allow the child process to call SetForegroundWindow so it can claim
+	// foreground status after creating its render window (WS_POPUP owned by us).
+	AllowSetForegroundWindow(processInfo.dwProcessId);
+
 	CloseHandle(processInfo.hThread);
 
 	if (requestHandleProcess) {
@@ -86,6 +128,7 @@ std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool req
 	}
 
 	return std::nullopt;
+#endif
 }
 
 #endif

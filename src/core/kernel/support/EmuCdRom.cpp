@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -105,7 +105,9 @@ void EmuCdRomSetup(std::filesystem::path CdRomPath, int BootFlags)
 	EmuBugCheckInline(result);
 
 
-	NtDll::HANDLE HostRootHandle = CreateFileW(CdRomPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	NtDll::HANDLE HostRootHandle = CxbxCreateHostFile(CdRomPath, GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS);
 	RegisterXboxObject(CdRomDeviceObject, HostRootHandle);
 	RegisterXboxObject<true>(CdRomDeviceObject, HostRootHandle);
 

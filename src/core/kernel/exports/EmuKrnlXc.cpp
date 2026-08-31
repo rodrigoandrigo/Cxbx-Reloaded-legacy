@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -53,10 +53,8 @@ xbox::void_xt NTAPI JumpedSHAInit
 	xbox::PUCHAR pbSHAContext
 )
 {
-	// The sha1 context supplied to this function has an extra 24 bytes at the beginning which are unsed by our implementation,
-	// so we skip them. The same is true for XcSHAUpdate and XcSHAFinal
-
-	SHA1Init((SHA1_CTX*)(pbSHAContext + 24));
+	// Xbox SHA context stores state[5] at offset 0, matching our SHA1_CTX layout
+	SHA1Init((SHA1_CTX*)pbSHAContext);
 }
 
 xbox::void_xt NTAPI JumpedSHAUpdate
@@ -66,7 +64,7 @@ xbox::void_xt NTAPI JumpedSHAUpdate
 	xbox::ulong_xt dwInputLength
 )
 {
-	SHA1Update((SHA1_CTX*)(pbSHAContext + 24), pbInput, dwInputLength);
+	SHA1Update((SHA1_CTX*)pbSHAContext, pbInput, dwInputLength);
 }
 
 xbox::void_xt NTAPI JumpedSHAFinal
@@ -75,7 +73,7 @@ xbox::void_xt NTAPI JumpedSHAFinal
 	xbox::PUCHAR pbDigest
 )
 {
-	SHA1Final(pbDigest, (SHA1_CTX*)(pbSHAContext + 24));
+	SHA1Final(pbDigest, (SHA1_CTX*)pbSHAContext);
 }
 
 xbox::void_xt NTAPI JumpedRC4Key

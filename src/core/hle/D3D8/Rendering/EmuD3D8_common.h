@@ -63,21 +63,23 @@
 #include "core\hle\Intercept.hpp"
 #include "devices\video\nv2a.h"
 #include "gui/resource/ResCxbx.h"
-#include "RenderStates.h"
-#include "TextureStates.h"
 #include "WalkIndexBuffer.h"
 #include "core\kernel\common\strings.hpp"
 #include "common\input\SdlJoystick.h"
+#if !defined(CXBXR_UWP)
 #include "common\input\DInputKeyboardMouse.h"
+#endif
 #include "common\input\InputManager.h"
 #include "common/util/strConverter.hpp"
 #include "Shaders\CxbxFixedFunctionVertexShaderState.hlsli"
-#include "PatchDraw.h"
+#include "Backend/PatchDraw.h"
 #include "Timer.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_dx11.h>
+#if !defined(CXBXR_UWP)
 #include <backends/imgui_impl_win32.h>
+#endif
 #include "core/common/video/RenderBase.hpp"
 
 #include <assert.h>

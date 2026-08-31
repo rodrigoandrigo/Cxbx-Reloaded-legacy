@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -294,7 +294,12 @@ void VMManager::GetPersistentMemory()
 	}
 
 	std::string persisted_mem_sid = str_persistent_memory_s + std::to_string(cli_config::GetSessionID());
+#if defined(CXBXR_UWP)
+	std::wstring persisted_mem_sid_w(persisted_mem_sid.begin(), persisted_mem_sid.end());
+	m_PersistentMemoryHandle = OpenFileMappingFromApp(FILE_MAP_READ, FALSE, persisted_mem_sid_w.c_str());
+#else
 	m_PersistentMemoryHandle = OpenFileMapping(FILE_MAP_READ, FALSE, persisted_mem_sid.c_str());
+#endif
 	if (m_PersistentMemoryHandle == nullptr) {
 		CxbxrAbort("Couldn't open persistent memory! OpenFileMapping failed with error 0x%08X", GetLastError());
 		return;
@@ -451,7 +456,15 @@ void VMManager::SavePersistentMemory()
 	}
 
 	std::string persistent_mem_sid = str_persistent_memory_s + std::to_string(cli_config::GetSessionID());
+#if defined(CXBXR_UWP)
+	std::wstring persistent_mem_sid_w(persistent_mem_sid.begin(), persistent_mem_sid.end());
+	m_PersistentMemoryHandle = CreateFileMappingFromApp(
+		INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+		static_cast<ULONG64>(num_persisted_ptes) * PAGE_SIZE + num_persisted_ptes * 4 * 2 + sizeof(PersistedMemory),
+		persistent_mem_sid_w.c_str());
+#else
 	m_PersistentMemoryHandle = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, num_persisted_ptes * PAGE_SIZE + num_persisted_ptes * 4 * 2 + sizeof(PersistedMemory), persistent_mem_sid.c_str());
+#endif
 	if (m_PersistentMemoryHandle == NULL) {
 		CxbxrAbort("Couldn't persist memory! CreateFileMapping failed with error 0x%08X", GetLastError());
 		return;
@@ -552,7 +565,9 @@ void VMManager::MemoryStatistics(xbox::PMM_STATISTICS memory_statistics)
 	memory_statistics->CachePagesCommitted = m_PagesByUsage[xbox::CacheType];
 	memory_statistics->PoolPagesCommitted = m_PagesByUsage[xbox::PoolType];
 	memory_statistics->StackPagesCommitted = m_PagesByUsage[xbox::StackType];
-	memory_statistics->ImagePagesCommitted = m_PagesByUsage[xbox::ImageType];
+	if (memory_statistics->Length >= sizeof(xbox::MM_STATISTICS)) {
+		memory_statistics->ImagePagesCommitted = m_PagesByUsage[xbox::ImageType];
+	}
 
 	Unlock();
 }
@@ -564,14 +579,13 @@ VAddr VMManager::ClaimGpuMemory(size_t Size, size_t* BytesToSkip)
 		LOG_FUNC_ARG(*BytesToSkip)
 	LOG_FUNC_END;
 
-	// Note that, even though devkits have 128 MiB, there's no need to have a different case for those, since the instance
-	// memory is still located 0x10000 bytes from the top of memory just like retail consoles
-
-	if (m_MmLayoutChihiro)
-		*BytesToSkip = 0;
-	else
-		*BytesToSkip = CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(X64M_PHYSICAL_PAGE) -
-		CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(XBOX_INSTANCE_PHYSICAL_PAGE + NV2A_INSTANCE_PAGE_COUNT);
+	// On real Xbox, instance memory is accessed through both the NV2A PRAMIN
+	// MMIO window (0xFD700000) and the contiguous mapping.  Both paths alias the
+	// same physical VRAM.  In our emulator the PRAMIN MMIO pages are a separate
+	// VirtualAlloc so we return the PRAMIN MMIO base directly — the D3D runtime
+	// writes DMA objects and RAMHT entries there, and ramin_ptr already points
+	// to the same address, keeping everything coherent.
+	*BytesToSkip = 0;
 
 	if (Size != MAXULONG_PTR)
 	{
@@ -624,7 +638,7 @@ VAddr VMManager::ClaimGpuMemory(size_t Size, size_t* BytesToSkip)
 		Unlock();
 	}
 
-	RETURN((VAddr)CONVERT_PFN_TO_CONTIGUOUS_PHYSICAL(m_HighestPage + 1) - *BytesToSkip);
+	RETURN((VAddr)NV2A_PRAMIN_BASE);
 }
 
 void VMManager::PersistMemory(VAddr addr, size_t Size, bool bPersist)

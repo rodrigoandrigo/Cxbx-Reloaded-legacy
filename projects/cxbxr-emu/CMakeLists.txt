@@ -33,8 +33,6 @@ link_directories(
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
  add_compile_definitions(
   _CRT_SECURE_NO_WARNINGS
-  # Windows 7 minimum requirement
-  _WIN32_WINNT=0x0601
   LTM_DESC
   USE_LTM
   LTC_NO_TEST
@@ -46,6 +44,14 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   LTC_NO_PROTOTYPES
 
  )
+
+ if(CXBXR_UWP_CORE)
+  # FromApp file/mapping declarations are gated on Windows 10 RS3+.
+  add_compile_definitions(_WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000005)
+ else()
+  # Windows 7 minimum requirement for the desktop build.
+  add_compile_definitions(_WIN32_WINNT=0x0601)
+ endif()
  add_compile_options(
   /EHs
   /MP
@@ -59,6 +65,15 @@ add_compile_definitions(
  CXBXR_EMU
  CXBXR_EMU_EXPORTS
 )
+
+if(CXBXR_UWP_CORE)
+ add_compile_definitions(
+  CXBXR_UWP=1
+  WINAPI_FAMILY=WINAPI_FAMILY_APP
+  # SimpleIni's portable byte-wise comparator avoids desktop-only _mbsicmp.
+  SI_NO_MBCS=1
+ )
+endif()
 
 file (GLOB RESOURCES
  "${CXBXR_ROOT_DIR}/CONTRIBUTORS"
@@ -77,6 +92,20 @@ source_group(TREE ${CXBXR_ROOT_DIR}/src PREFIX header FILES
  "${CXBXR_ROOT_DIR}/src/emulator/targetver.h"
 )
 
+# The desktop render window imports USER32/GDI and cannot be part of an
+# AppContainer DLL. HostDevice retains shared D3D helpers but compiles its
+# HWND path out under CXBXR_UWP; HostWindow is replaced completely.
+if(CXBXR_UWP_CORE)
+ list(REMOVE_ITEM CXBXR_SOURCE_EMU
+  "${CXBXR_ROOT_DIR}/src/core/hle/D3D8/Rendering/Backend/HostWindow.cpp"
+  "${CXBXR_ROOT_DIR}/src/devices/x86/EmuX86.cpp"
+ )
+ list(APPEND CXBXR_SOURCE_EMU
+  "${CXBXR_ROOT_DIR}/src/core/hle/D3D8/Rendering/Backend/HostWindowUwp.cpp"
+  "${CXBXR_ROOT_DIR}/src/devices/x86/EmuX86Tcg.cpp"
+ )
+endif()
+
 source_group(TREE ${CXBXR_ROOT_DIR}/import PREFIX import FILES
  ${CXBXR_SOURCE_EMU_IMPORT}
 )
@@ -86,6 +115,7 @@ source_group(TREE ${CXBXR_ROOT_DIR}/src PREFIX source FILES
  ${CXBXR_SOURCE_COMMON}
  ${CXBXR_SOURCE_EMU}
  "${CXBXR_ROOT_DIR}/src/emulator/cxbxr-emu.cpp"
+ "${CXBXR_ROOT_DIR}/src/emulator/CxbxEmbed.cpp"
  "${CXBXR_ROOT_DIR}/src/emulator/dllmain.cpp"
 )
 
@@ -101,11 +131,18 @@ add_library(${PROJECT_NAME} SHARED ${RESOURCES}
  ${CXBXR_SOURCE_EMU}
  ${CXBXR_GIT_VERSION_H}
  "${CXBXR_ROOT_DIR}/src/emulator/cxbxr-emu.cpp"
+ "${CXBXR_ROOT_DIR}/src/emulator/CxbxEmbed.cpp"
  "${CXBXR_ROOT_DIR}/src/emulator/dllmain.cpp"
 )
 
 # Link and compile flags
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+
+ if(CXBXR_UWP_CORE)
+  set(CXBXR_WPCAP_DELAYLOAD "")
+ else()
+  set(CXBXR_WPCAP_DELAYLOAD "/DELAYLOAD:wpcap.dll")
+ endif()
 
  set_target_properties(${PROJECT_NAME} PROPERTIES
   LINK_FLAGS "
@@ -114,7 +151,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   /SAFESEH:NO \
   /STACK:65536,65536 \
   /NODEFAULTLIB:libcmt \
-  /DELAYLOAD:wpcap.dll \
+  ${CXBXR_WPCAP_DELAYLOAD} \
   "
   LINK_FLAGS_RELEASE "
   /LTCG \
@@ -148,6 +185,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   ${CXBXR_SOURCE_EMU_IMPORT}
   ${CXBXR_SOURCE_EMU}
   "${CXBXR_ROOT_DIR}/src/emulator/cxbxr-emu.cpp"
+  "${CXBXR_ROOT_DIR}/src/emulator/CxbxEmbed.cpp"
   "${CXBXR_ROOT_DIR}/src/emulator/dllmain.cpp"
  )
  foreach(src IN LISTS ALL_EMU_SOURCES)
@@ -161,36 +199,52 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
  endforeach()
 endif()
 
-# Windows libraries
-set(WINS_LIB
- legacy_stdio_definitions
- delayimp
- dinput8
- dxguid
- odbc32
- odbccp32
- Shlwapi
- dxerr9
- ws2_32
- dsound
- winmm
- ddraw
- dbghelp
- comctl32
- XINPUT9_1_0
- Iphlpapi
- wpcap
-)
+# Windows libraries. A UWP core must resolve the all-device Win32 API set
+# through WindowsApp.lib rather than acquiring desktop imports from the
+# compatibility DLLs. D3D11/DXGI/D3DCompiler remain explicit because the UWP
+# renderer uses those supported graphics APIs directly.
+if(CXBXR_UWP_CORE)
+ set(WINS_LIB WindowsApp d3d11 dxgi d3dcompiler dxguid)
+else()
+ set(WINS_LIB
+  legacy_stdio_definitions
+  delayimp
+  dinput8
+  dxguid
+  odbc32
+  odbccp32
+  Shlwapi
+  dxerr9
+  ws2_32
+  dsound
+  winmm
+  ddraw
+  dbghelp
+  comctl32
+  XINPUT9_1_0
+  Iphlpapi
+  wpcap
+  d3d11
+  dxgi
+  d3dcompiler
+ )
+endif()
 
-list(APPEND WINS_LIB d3d11 dxgi d3dcompiler)
+set(CXBXR_SDL_TARGET SDL2)
+set(CXBXR_INPUT_TARGET libusb)
+if(CXBXR_UWP_CORE)
+ set(CXBXR_SDL_TARGET SDL3::SDL3)
+ set(CXBXR_INPUT_TARGET)
+ target_compile_definitions(${PROJECT_NAME} PRIVATE SDL_ENABLE_OLD_NAMES=1)
+endif()
 
 target_link_libraries(${PROJECT_NAME}
  PUBLIC libXbSymbolDatabase
  subhook
  libtomcrypt
- SDL2
+ ${CXBXR_SDL_TARGET}
  imgui
- libusb
+ ${CXBXR_INPUT_TARGET}
  nv2a_vsh_emulator
  nv2a_vsh_disassembler
  mio::mio_min_winapi
@@ -202,7 +256,11 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
-add_dependencies(${PROJECT_NAME} cxbxr-ldr misc-batch compile-shaders)
+if(CXBXR_UWP_CORE)
+ add_dependencies(${PROJECT_NAME} misc-batch compile-shaders)
+else()
+ add_dependencies(${PROJECT_NAME} cxbxr-ldr misc-batch compile-shaders)
+endif()
 
 # Try to stop cmake from building hlsl files
 # Which are all currently loaded at runtime only

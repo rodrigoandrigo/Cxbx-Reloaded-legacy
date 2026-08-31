@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -154,7 +154,8 @@ static void EmuMuPartitionSetup(xbox::dword_xt MuIndex)
 	if (!std::filesystem::exists(partitionHeaderPath)) {
 		CxbxCreatePartitionHeaderFile(partitionHeaderPath, MuIndex == 0);
 	}
-	MuPath.HostBinHandle = CreateFileW(partitionHeaderPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	MuPath.HostBinHandle = CxbxCreateHostFile(partitionHeaderPath, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
 
 	// If this path is not a raw file partition, create the directory for it
 	std::error_code error; // We do not want filesystem to throw an exception on directory creation. Instead, listen for return value to fail.
@@ -191,7 +192,8 @@ static void EmuMuPartitionSetup(xbox::dword_xt MuIndex)
 	MuPath.DeviceObject = MuDeviceObject;
 
 	if (succeeded) {
-		MuPath.HostRootHandle = CreateFileA(MuPath.HostDevicePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		MuPath.HostRootHandle = CxbxCreateHostFile(std::filesystem::path(MuPath.HostDevicePath), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
 		// Force pretend has directory instead of binary partition.
 		RegisterXboxObject(MuDeviceObject, MuPath.HostRootHandle);
 		RegisterXboxObject<true>(MuDeviceObject, MuPath.HostBinHandle);

@@ -28,17 +28,18 @@
 #define LOG_PREFIX CXBXR_MODULE::PSHB
 
 #include <assert.h> // For assert()
+#include <cstring>  // For memcpy (type-punning in float depth decode)
 
 #include "core\kernel\support\Emu.h"
 #include "core\hle\D3D8\XbD3D8Types.h" // For X_D3DFORMAT
 #include "core\hle\D3D8\ResourceTracker.h"
-#include "core\hle\D3D8\Rendering\RenderGlobals.h" // For g_Xbox_VertexShader_Handle
+#include "core\hle\D3D8\Rendering\RenderGlobals.h"
 #include "core\hle\D3D8\XbPushBuffer.h"
 #include "core\hle\D3D8\XbConvert.h"
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11.h" // For CxbxD3D11VertexFetchDraw
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11_Profiler.h"
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11_PageTracker.h"
-#include "core\hle\D3D8\Rendering\PatchDraw.h" // For D3D11_draw_patch
+#include "core\hle\D3D8\Rendering\Backend\PatchDraw.h" // For D3D11_draw_patch
 #include "core\hle\D3D8\XbVertexShader.h" // For D3D11_launch_transform_program
 #include "common/AddressRanges.h" // For CONTIGUOUS_MEMORY_BASE
 #include "core/common/video/RenderBase.hpp" // For g_renderbase
@@ -71,8 +72,8 @@ static void D3D11_draw_arrays(NV2AState *d)
 		CxbxDrawContext DrawContext = {};
 
 		DrawContext.XboxPrimitiveType = (xbox::X_D3DPRIMITIVETYPE)pg->primitive_mode;
-		DrawContext.dwStartVertex = pg->gl_draw_arrays_start[i];
-		DrawContext.dwVertexCount = pg->gl_draw_arrays_count[i];
+		DrawContext.dwStartVertex = pg->draw_arrays_start[i];
+		DrawContext.dwVertexCount = pg->draw_arrays_count[i];
 
 		CxbxD3D11VertexFetchDraw(DrawContext);
 	}
@@ -95,10 +96,14 @@ static void D3D11_draw_inline_array(NV2AState *d)
 	// Compute per-vertex stride from NV2A vertex attribute format registers.
 	// Inline array data packs all enabled attributes contiguously per vertex,
 	// unlike array-based draws which use the stride field from the format register.
+	// Push buffer data is DWORD-granular, so each attribute is padded to the next
+	// 4-byte boundary. This matters for formats whose count*size is not a multiple
+	// of 4 (e.g. SHORT3=6, PBYTE3=3, NORMSHORT3=6).
 	unsigned int nv2a_stride = 0;
 	for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
 		if (pg->vertex_attributes[i].count != 0) { // count 0 = disabled (format 0 is valid: UB_D3D/D3DCOLOR)
 			nv2a_stride += pg->vertex_attributes[i].count * pg->vertex_attributes[i].size;
+			nv2a_stride = (nv2a_stride + 3) & ~3u; // pad to DWORD boundary
 		}
 	}
 
@@ -141,6 +146,7 @@ static void D3D11_draw_inline_elements(NV2AState *d)
 // which vertex data buffer was filled between BEGIN and END.
 void D3D11_draw(NV2AState *d)
 {
+	CxbxPageTrackerLockD3D11Context();
 	PGRAPHState *pg = &d->pgraph;
 
 	if (pg->draw_arrays_length) {
@@ -152,10 +158,12 @@ void D3D11_draw(NV2AState *d)
 	} else if (pg->inline_elements_length) {
 		D3D11_draw_inline_elements(d);
 	}
+	CxbxPageTrackerUnlockD3D11Context();
 }
 
 void D3D11_draw_state_update(NV2AState *d)
 {
+	CxbxPageTrackerLockD3D11Context();
 	PGRAPHState *pg = &d->pgraph;
 
 	// Vertex attribute inline_value may have changed via NV2A push buffer
@@ -176,8 +184,7 @@ void D3D11_draw_state_update(NV2AState *d)
 	}
 
 	CxbxUpdateNativeD3DResources();
-
-	LOG_INCOMPLETE(); // TODO : Read state from pgraph, convert to D3D
+	CxbxPageTrackerUnlockD3D11Context();
 }
 
 // ---- NV2A Zpass pixel count (visibility test) via D3D11 occlusion queries ----
@@ -269,6 +276,7 @@ static void D3D11_zpass_collect(NV2AState *d)
 
 void D3D11_draw_clear(NV2AState *d)
 {
+	CxbxPageTrackerLockD3D11Context();
 	PGRAPHState *pg = &d->pgraph;
 
 	CxbxUpdateNativeD3DResources();
@@ -289,8 +297,10 @@ void D3D11_draw_clear(NV2AState *d)
 	if (flags & NV097_CLEAR_SURFACE_STENCIL)
 		hostFlags |= D3DCLEAR_STENCIL;
 
-	if (hostFlags == 0)
+	if (hostFlags == 0) {
+		CxbxPageTrackerUnlockD3D11Context();
 		return;
+	}
 
 	D3DCOLOR color = pg->regs[RI(NV_PGRAPH_COLORCLEARVALUE)];
 	uint32_t zstencil = pg->regs[RI(NV_PGRAPH_ZSTENCILCLEARVALUE)];
@@ -298,18 +308,47 @@ void D3D11_draw_clear(NV2AState *d)
 	// Decode Z and stencil based on the surface zeta format:
 	// Z16 (format 1): 16-bit depth in bits [15:0], no stencil
 	// Z24S8 (format 2): 24-bit depth in bits [31:8], 8-bit stencil in bits [7:0]
+	// When z_format is set, the depth is stored as a float (F16 or F24) rather
+	// than a fixed-point integer — must be decoded accordingly.
 	float z;
 	DWORD stencil;
 	unsigned int zeta_format = NV2AGetSurfaceState(pg).zetaFormat;
+	bool z_format = (pg->regs[RI(NV_PGRAPH_SETUPRASTER)] & NV_PGRAPH_SETUPRASTER_Z_FORMAT) != 0;
 	if (zeta_format == NV097_SET_SURFACE_FORMAT_ZETA_Z16) {
-		z = (float)(zstencil & 0xFFFF) / (float)0xFFFF;
+		uint16_t zRaw = (uint16_t)(zstencil & 0xFFFF);
+		if (z_format) {
+			// F16 float depth: shift left 11 bits + add exponent bias to form float32
+			if (zRaw == 0) {
+				z = 0.0f;
+			} else {
+				uint32_t f32bits = ((uint32_t)zRaw << 11) + 0x3C000000;
+				float f16val;
+				memcpy(&f16val, &f32bits, sizeof(float));
+				z = f16val / 511.9375f; // f16_max
+			}
+		} else {
+			z = (float)zRaw / (float)0xFFFF;
+		}
 		stencil = 0;
 		// Z16 has no stencil — strip stencil clear flag
 		hostFlags &= ~D3DCLEAR_STENCIL;
 	} else {
-		// Z24S8 (default)
-		z = (float)(zstencil >> 8) / (float)0xFFFFFF;
+		// Z24S8
 		stencil = zstencil & 0xFF;
+		uint32_t zRaw = zstencil >> 8;
+		if (z_format) {
+			// F24 float depth: shift left 7 bits to form float32
+			if (zRaw == 0) {
+				z = 0.0f;
+			} else {
+				uint32_t f32bits = zRaw << 7;
+				float f24val;
+				memcpy(&f24val, &f32bits, sizeof(float));
+				z = f24val / 1.0e30f; // f24_max
+			}
+		} else {
+			z = (float)zRaw / (float)0xFFFFFF;
+		}
 	}
 
 	// Read clear rect from PGRAPH.  Use a single rect covering the clear area.
@@ -326,29 +365,30 @@ void D3D11_draw_clear(NV2AState *d)
 	rect.right  += 1;
 	rect.bottom += 1;
 
-	// Scale for upscale factor and MSAA
-	float aaX, aaY;
-	GetMultiSampleScaleRaw(aaX, aaY);
-	float Xscale = aaX * g_RenderUpscaleFactor;
-	float Yscale = aaY * g_RenderUpscaleFactor;
+	// Apply anti-aliasing factor from PGRAPH surface state (matches xemu's
+	// pgraph_apply_anti_aliasing_factor). The NV2A clear rect registers contain
+	// logical coordinates; the AA factor expands them to physical surface pixels.
+	auto surf = NV2AGetSurfaceState(pg);
+	unsigned int aaFactorX = 1, aaFactorY = 1;
+	switch (surf.antiAliasing) {
+	case NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2:
+		aaFactorX = 2; break;
+	case NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_SQUARE_OFFSET_4:
+		aaFactorX = 2; aaFactorY = 2; break;
+	default: break;
+	}
+	float Xscale = (float)aaFactorX * g_RenderUpscaleFactor;
+	float Yscale = (float)aaFactorY * g_RenderUpscaleFactor;
 	rect.left   = static_cast<LONG>(rect.left   * Xscale);
 	rect.right  = static_cast<LONG>(rect.right  * Xscale);
 	rect.top    = static_cast<LONG>(rect.top    * Yscale);
 	rect.bottom = static_cast<LONG>(rect.bottom * Yscale);
 
 	CxbxD3DClear(1, &rect, hostFlags, color, z, stencil);
+	CxbxPageTrackerUnlockD3D11Context();
 }
 
-// Import pgraph_draw_* variables, declared in EmuNV2A_PGRAPH.cpp :
-extern void(*pgraph_draw)(NV2AState *d);
-extern void(*pgraph_draw_state_update)(NV2AState *d);
-extern void(*pgraph_draw_clear)(NV2AState *d);
-extern void(*pgraph_draw_patch)(NV2AState *d);
-extern void(*pgraph_flip_stall)(NV2AState *d);
-extern void(*pgraph_zpass_begin)(NV2AState *d);
-extern void(*pgraph_zpass_end)(NV2AState *d);
-extern void(*pgraph_zpass_collect)(NV2AState *d);
-extern void(*pgraph_launch_transform_program)(NV2AState *d, unsigned int program_start);
+#include "devices/video/nv2a_pgraph_backend.h"
 
 extern void CxbxImGui_RenderD3D(ImGuiUI* m_imgui, ID3D11Texture2D* renderTarget);
 
@@ -356,11 +396,14 @@ extern void CxbxImGui_RenderD3D(ImGuiUI* m_imgui, ID3D11Texture2D* renderTarget)
 // Blits the PGRAPH-tracked backbuffer to the host swap chain and presents.
 static void D3D11_flip_stall(NV2AState *d)
 {
+	CxbxPageTrackerLockD3D11Context();
 	// Get host swap chain backbuffer
 	ID3D11Texture2D *pHostBackBuffer = nullptr;
 	HRESULT hRet = CxbxGetBackBuffer(&pHostBackBuffer);
-	if (hRet != S_OK || !pHostBackBuffer)
+	if (hRet != S_OK || !pHostBackBuffer) {
+		CxbxPageTrackerUnlockD3D11Context();
 		return;
+	}
 
 	// Save and restore the game's render target around the present blit.
 	// CxbxD3D11Blt manages its own RT state internally, so the PGRAPH RT
@@ -370,9 +413,15 @@ static void D3D11_flip_stall(NV2AState *d)
 	// Clear host backbuffer to black (prevents artifacts on aspect ratio change)
 	(void)CxbxSetRenderTarget(pHostBackBuffer);
 	CxbxD3DClear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
-	if (pExistingRT) {
-		(void)CxbxSetRenderTarget(pExistingRT);
-	}
+
+	// Restore the previous RT. When the game was in depth-only mode
+	// (shadow pass), pExistingRT is nullptr — we must still call
+	// CxbxSetRenderTarget to reset g_pD3DCurrentHostRenderTarget away from
+	// pHostBackBuffer (which is about to be Released). Passing nullptr
+	// resets to the default backbuffer view (safe, persistent surface).
+	// The next CxbxD3D11UpdateRenderTargetFromPGRAPH will rebind the correct
+	// RT/DS from PGRAPH state anyway.
+	(void)CxbxSetRenderTarget(pExistingRT);
 
 	// Calculate destination rect (centered, aspect-ratio aware)
 	float width, height;
@@ -384,8 +433,16 @@ static void D3D11_flip_stall(NV2AState *d)
 		height = (float)g_HostBackBufferDesc.Height;
 	}
 
-	// Blit PGRAPH backbuffer to host backbuffer
-	auto pXboxBackBufferHostSurface = g_pHostPgraphBackBuffer;
+	// Resolve display surface from PCRTC scan-out address (hardware-accurate path).
+	// Falls back to the last-rendered PGRAPH RT if pcrtc.start isn't in the cache
+	// (e.g., during early boot before the first RT at that address is created).
+	ID3D11Texture2D* pXboxBackBufferHostSurface = nullptr;
+	if (d->pcrtc.start != 0) {
+		pXboxBackBufferHostSurface = CxbxLookupPgraphRTByOffset(d->pcrtc.start);
+	}
+	if (!pXboxBackBufferHostSurface) {
+		pXboxBackBufferHostSurface = g_pHostPgraphBackBuffer;
+	}
 	if (pXboxBackBufferHostSurface) {
 		RECT dest{};
 		dest.top = (LONG)((g_HostBackBufferDesc.Height - height) / 2);
@@ -435,9 +492,23 @@ static void D3D11_flip_stall(NV2AState *d)
 			int out_w = GET_MASK(pvideo_size_out, NV_PVIDEO_SIZE_OUT_WIDTH);
 			int out_h = GET_MASK(pvideo_size_out, NV_PVIDEO_SIZE_OUT_HEIGHT);
 
-			// Scale overlay output rect from Xbox framebuffer coords to host backbuffer coords
-			DWORD XboxBackBufferWidth = g_PgraphBackBufferWidth;
-			DWORD XboxBackBufferHeight = g_PgraphBackBufferHeight;
+			// Scale overlay output rect from Xbox framebuffer coords to host backbuffer coords.
+			// PVIDEO coordinates are ALWAYS in scanout/display space (the resolution
+			// programmed into the DAC, i.e. what the TV receives). Use PRAMDAC timing
+			// as the definitive reference — this is independent of whether the 3D render
+			// target is AA-scaled or has been reconfigured for video-only playback.
+			DWORD XboxBackBufferWidth = 0;
+			DWORD XboxBackBufferHeight = 0;
+			// Primary: PRAMDAC flat-panel display end (true scanout resolution)
+			{
+				DWORD fp_h = d->pramdac.regs[RI(NV_PRAMDAC_FP_HDISPLAY_END)];
+				DWORD fp_v = d->pramdac.regs[RI(NV_PRAMDAC_FP_VDISPLAY_END)];
+				if (fp_h > 0) XboxBackBufferWidth = fp_h + 1;
+				if (fp_v > 0) XboxBackBufferHeight = fp_v + 1;
+			}
+			// Fallback: PGRAPH tracked dimensions (logical, not AA-scaled)
+			if (XboxBackBufferWidth == 0) XboxBackBufferWidth = g_PgraphBackBufferWidth;
+			if (XboxBackBufferHeight == 0) XboxBackBufferHeight = g_PgraphBackBufferHeight;
 			if (XboxBackBufferWidth == 0) XboxBackBufferWidth = 640;
 			if (XboxBackBufferHeight == 0) XboxBackBufferHeight = 480;
 
@@ -521,25 +592,29 @@ static void D3D11_flip_stall(NV2AState *d)
 		CxbxPresent();
 	}
 
+	// Evict stale render target cache entries
+	CxbxPgraphRTCacheEvict();
+
 	// Update FPS counter
 	g_renderbase->UpdateFPSCounter();
 
 	// Profiler: tick frame and dump timing breakdown once per second
 	CxbxProfilerFrameTick();
+	CxbxPageTrackerUnlockD3D11Context();
 }
 
 void D3D11_init_pgraph_plugins()
 {
 	/* attach HLE Direct3D render plugins */
-	pgraph_draw = D3D11_draw;
-	pgraph_draw_state_update = D3D11_draw_state_update;
-	pgraph_draw_clear = D3D11_draw_clear;
-	pgraph_draw_patch = D3D11_draw_patch;
-	pgraph_flip_stall = D3D11_flip_stall;
-	pgraph_zpass_begin = D3D11_zpass_begin;
-	pgraph_zpass_end = D3D11_zpass_end;
-	pgraph_zpass_collect = D3D11_zpass_collect;
-	pgraph_launch_transform_program = D3D11_launch_transform_program;
+	g_pgraph_backend.draw = D3D11_draw;
+	g_pgraph_backend.draw_state_update = D3D11_draw_state_update;
+	g_pgraph_backend.draw_clear = D3D11_draw_clear;
+	g_pgraph_backend.draw_patch = D3D11_draw_patch;
+	g_pgraph_backend.flip_stall = D3D11_flip_stall;
+	g_pgraph_backend.zpass_begin = D3D11_zpass_begin;
+	g_pgraph_backend.zpass_end = D3D11_zpass_end;
+	g_pgraph_backend.zpass_collect = D3D11_zpass_collect;
+	g_pgraph_backend.launch_transform_program = D3D11_launch_transform_program;
 }
 
 extern void pgraph_handle_method(
@@ -553,16 +628,6 @@ uint32_t NV2A_read_pgraph_register(const int reg)
 	NV2AState* dev = g_NV2A->GetDeviceState();
 	PGRAPHState *pg = &(dev->pgraph);
 	return pg->regs[RI(reg)];
-}
-
-float *NV2A_get_vertex_attribute_value_pointer(unsigned slot)
-{
-	NV2AState* dev = g_NV2A->GetDeviceState();
-	PGRAPHState *pg = &(dev->pgraph);
-
-	// See CASE_16(NV097_SET_VERTEX_DATA4UB, 4) in LLE pgraph_handle_method()
-	VertexAttribute *vertex_attribute = &pg->vertex_attributes[slot];
-	return vertex_attribute->inline_value;
 }
 
 const char *NV2AMethodToString(DWORD dwMethod)

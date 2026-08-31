@@ -25,7 +25,7 @@
 #ifndef DIRECTSOUNDLOGGING_H
 #define DIRECTSOUNDLOGGING_H
 
-#include <dsound.h>
+#include "../DsoundHostTypes.h"
 #include <mmreg.h>
 #include "Logging.h"
 

@@ -39,11 +39,16 @@
 #include "common/cxbxr.hpp"
 
 #include "SdlJoystick.h"
+#if !defined(CXBXR_UWP)
 #include "XInputPad.h"
 #include "RawDevice.h"
 #include "DInputKeyboardMouse.h"
 #include "LibusbDevice.h"
+#endif
 #include "InputManager.h"
+#if defined(CXBXR_UWP)
+#include "common/CxbxEmbedRuntime.h"
+#endif
 #include "..\devices\usb\XidGamepad.h"
 #include "core\kernel\exports\EmuKrnl.h" // For EmuLog
 #include "EmuShared.h"
@@ -76,7 +81,7 @@ void UpdateXppState(DeviceState *dev, XBOX_INPUT_DEVICE type, std::string_view p
 
 InputDeviceManager g_InputDeviceManager;
 
-void InputDeviceManager::Initialize(bool is_gui, HWND hwnd)
+void InputDeviceManager::Initialize(bool is_gui, CxbxInputWindowHandle hwnd)
 {
 	// Sdl::Init must be called last since it blocks when it succeeds
 	std::unique_lock<std::mutex> lck(m_Mtx);
@@ -92,21 +97,31 @@ void InputDeviceManager::Initialize(bool is_gui, HWND hwnd)
 		}
 #endif
 
+#if !defined(CXBXR_UWP)
 		XInput::Init(m_Mtx);
 		RawInput::Init(m_Mtx, is_gui, m_hwnd);
 		Libusb::Init(m_Mtx);
+#endif
 		Sdl::Init(m_Mtx, m_Cv, is_gui);
 		});
 
 	m_Cv.wait(lck, []() {
-		return (Sdl::InitStatus != Sdl::NOT_INIT) &&
+		return (Sdl::InitStatus != Sdl::NOT_INIT)
+#if !defined(CXBXR_UWP)
+			&&
 			(XInput::InitStatus != XInput::NOT_INIT) &&
 			(RawInput::InitStatus != RawInput::NOT_INIT) &&
-			(Libusb::InitStatus != Libusb::NOT_INIT);
+			(Libusb::InitStatus != Libusb::NOT_INIT)
+#endif
+			;
 		});
 	lck.unlock();
 
-	if (Sdl::InitStatus < 0 || XInput::InitStatus < 0 || RawInput::InitStatus < 0 || Libusb::InitStatus < 0) {
+	if (Sdl::InitStatus < 0
+#if !defined(CXBXR_UWP)
+		|| XInput::InitStatus < 0 || RawInput::InitStatus < 0 || Libusb::InitStatus < 0
+#endif
+	) {
 		CxbxrAbort("Failed to initialize input subsystem! Consult debug log for more information");
 	}
 
@@ -156,7 +171,9 @@ void InputDeviceManager::Initialize(bool is_gui, HWND hwnd)
 		}
 	}
 
+#if !defined(CXBXR_UWP)
 	RawInput::IgnoreHotplug = false;
+#endif
 }
 
 void InputDeviceManager::Shutdown()
@@ -174,9 +191,11 @@ void InputDeviceManager::Shutdown()
 	}
 	m_Devices.clear();
 
+#if !defined(CXBXR_UWP)
 	XInput::DeInit();
 	RawInput::DeInit();
 	Libusb::DeInit();
+#endif
 	Sdl::DeInit(m_PollingThread);
 }
 
@@ -770,7 +789,15 @@ bool InputDeviceManager::UpdateInputSBC(std::shared_ptr<InputDevice>& Device, vo
 
 bool InputDeviceManager::UpdateInputHw(std::shared_ptr<InputDevice> &Device, void *Buffer, int Direction)
 {
+#if defined(CXBXR_UWP)
+	// USB passthrough has no AppContainer equivalent and remains unavailable.
+	(void)Device;
+	(void)Buffer;
+	(void)Direction;
+	return false;
+#else
 	return dynamic_cast<Libusb::LibusbDevice *>(Device.get())->ExecuteIo(Buffer, Direction);
+#endif
 }
 
 void InputDeviceManager::RefreshDevices()
@@ -779,20 +806,24 @@ void InputDeviceManager::RefreshDevices()
 	Sdl::PopulateOK = false;
 	m_Devices.clear();
 	lck.unlock();
+#if !defined(CXBXR_UWP)
 	XInput::PopulateDevices();
 	DInput::PopulateDevices();
-	Sdl::PopulateDevices();
 	Libusb::PopulateDevices();
+#endif
+	Sdl::PopulateDevices();
 	lck.lock();
 	m_Cv.wait(lck, []() {
 		return Sdl::PopulateOK;
 		});
+#if !defined(CXBXR_UWP)
 	for (auto &dev : m_Devices) {
 		if (dev->GetDeviceName().starts_with("KeyboardMouse")) {
 			static_cast<DInput::KeyboardMouse *>(dev.get())->SetHwnd(m_hwnd);
 			break;
 		}
 	}
+#endif
 }
 
 std::vector<std::string> InputDeviceManager::GetDeviceList(std::function<bool(const InputDevice *)> Callback) const
@@ -856,6 +887,10 @@ std::shared_ptr<InputDevice> InputDeviceManager::FindDevice(std::string_view por
 
 void InputDeviceManager::UpdateOpt(bool is_gui)
 {
+#if defined(CXBXR_UWP)
+	(void)is_gui;
+	return;
+#else
 	if (!is_gui) {
 		Settings::s_input_general input_general;
 		g_EmuShared->GetInputGeneralSettings(&input_general);
@@ -871,13 +906,18 @@ void InputDeviceManager::UpdateOpt(bool is_gui)
 		DInput::mo_axis_range_neg = -(g_Settings->m_input_general.MoAxisRange);
 		DInput::mo_wheel_range_neg = -(g_Settings->m_input_general.MoWheelRange);
 	}
+#endif
 }
 
 void InputDeviceManager::HotplugHandler(bool is_sdl)
 {
 	// RawInput will start to send WM_INPUT_DEVICE_CHANGE as soon as RegisterRawInputDevices succeeds, but at that point, the input manager
 	// is still not completely initialized, so we ignore hotplug events during initialization
-	if (m_bPendingShutdown || RawInput::IgnoreHotplug) {
+	if (m_bPendingShutdown
+#if !defined(CXBXR_UWP)
+		|| RawInput::IgnoreHotplug
+#endif
+	) {
 		return;
 	}
 
@@ -885,6 +925,7 @@ void InputDeviceManager::HotplugHandler(bool is_sdl)
 	// and xinput devices are monitored by rawinput with the WM_INPUT_DEVICE_CHANGE message
 	// NOTE2: sdl devices are already added/removed to/from m_Devices with the above events, so don't need to update m_Devices here again
 	if (!is_sdl) {
+#if !defined(CXBXR_UWP)
 		std::unique_lock<std::mutex> lck(m_Mtx);
 
 		auto it = std::remove_if(m_Devices.begin(), m_Devices.end(), [](const auto &Device) {
@@ -902,6 +943,7 @@ void InputDeviceManager::HotplugHandler(bool is_sdl)
 		// When this was written, libusb did not yet support device hotplug on Windows, as documented in this issue https://github.com/libusb/libusb/issues/86.
 		// So we add the below call here. This will only work if rawinput detects the libusb device.
 		Libusb::PopulateDevices();
+#endif
 	}
 
 	for (int port = PORT_1; port <= PORT_4; ++port) {
@@ -925,10 +967,21 @@ ImVec2 InputDeviceManager::CalcLaserPos(int port)
 		static long width, height = -1;
 		if (height == -1) {
 
+#if defined(CXBXR_UWP)
+			// The host-owned D3D11 presentation is the output authority.
+			const auto* presentation = CxbxEmbedRuntimeGetD3D11Presentation();
+			if (presentation == nullptr) {
+				m_Mtx.unlock();
+				return laser_coord[port];
+			}
+			width = std::max(static_cast<long>(presentation->width), 1l);
+			height = std::max(static_cast<long>(presentation->height), 1l);
+#else
 			RECT rect;
 			GetClientRect(m_hwnd, &rect);
 			width = std::max(rect.right - rect.left, 1l);
 			height = std::max(rect.bottom - rect.top, 1l);
+#endif
 		}
 
 		// We convert the laser input coordinates given by xinput (in the sThumbLXY members of XpadInput) with linear interpolation y = y0 + (x - x0) * (y1 - y0) / (x1 - x0)

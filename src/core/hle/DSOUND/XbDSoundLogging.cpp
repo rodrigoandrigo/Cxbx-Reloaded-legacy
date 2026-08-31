@@ -23,7 +23,7 @@
 // *
 // ******************************************************************
 
-#include <dsound.h> // Temporary placeholder until XbDSoundTypes.h is cross-platform + filled in the blanks
+#include "DsoundHostTypes.h" // Temporary placeholder until XbDSoundTypes.h is cross-platform + filled in the blanks
 #include "Logging.h"
 #include "common/xbox/Logging.hpp"
 #include "XbDSoundLogging.hpp"

@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -36,13 +36,23 @@
 #include "EmuShared.h"
 #include "core\hle\Intercept.hpp"
 #include "CxbxDebugger.h"
+#include "common/CxbxEmbedRuntime.h"
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11_Profiler.h"
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11_PageTracker.h"
 
+#if !defined(CXBXR_UWP)
+# include <Dbghelp.h>
+# include <TlHelp32.h>
+#endif
+#include <atomic>
+#include <chrono>
 #ifdef _DEBUG
-#include <Dbghelp.h>
 CRITICAL_SECTION dbgCritical;
 #endif
+
+// Present stall detection
+std::atomic<uint64_t> g_LastPresentTick{0};
+static std::atomic<bool> g_PresentStallDumped{false};
 
 // Global Variable(s)
 volatile thread_local  bool    g_bEmuException = false;
@@ -51,8 +61,43 @@ bool g_DisablePixelShaders = false;
 bool g_UseAllCores = false;
 bool g_SkipRdtscPatching = false;
 
-// Static Function(s)
-static int ExitException(LPEXCEPTION_POINTERS e);
+#if defined(CXBXR_UWP)
+
+ExceptionManager *g_ExceptionManager = nullptr;
+
+ExceptionManager::ExceptionManager()
+	: accept_request(false)
+{
+}
+
+ExceptionManager::~ExceptionManager() = default;
+
+void ExceptionManager::EmuX86_Init()
+{
+	// Guest faults are returned by qemu_cxbx_cpu_run; no host VEH is used.
+}
+
+bool ExceptionManager::AddVEH(unsigned long, PVECTORED_EXCEPTION_HANDLER)
+{
+	return false;
+}
+
+bool ExceptionManager::AddVEH(unsigned long, PVECTORED_EXCEPTION_HANDLER, bool)
+{
+	return false;
+}
+
+void EmuPrintStackTrace(PCONTEXT)
+{
+	EmuLog(LOG_LEVEL::WARNING, "Host stack traces are unavailable in the UWP TCG execution path");
+}
+
+void EmuDumpAllThreadStacks(const char* reason)
+{
+	EmuLog(LOG_LEVEL::WARNING, "TCG thread-state dump requested: %s", reason ? reason : "unspecified");
+}
+
+#else
 
 std::string EIPToString(xbox::addr_xt EIP)
 {
@@ -93,10 +138,8 @@ void EmuExceptionPrintDebugInformation(LPEXCEPTION_POINTERS e, bool IsBreakpoint
 			e->ContextRecord->Esi, e->ContextRecord->Edi, e->ContextRecord->Esp, e->ContextRecord->Ebp,
 			e->ContextRecord->Dr2);
 
-#ifdef _DEBUG
 		CONTEXT Context = *(e->ContextRecord);
 		EmuPrintStackTrace(&Context);
-#endif
 	}
 
 	fflush(stdout);
@@ -104,6 +147,12 @@ void EmuExceptionPrintDebugInformation(LPEXCEPTION_POINTERS e, bool IsBreakpoint
 
 void EmuExceptionExitProcess()
 {
+	if (CxbxEmbedRuntimeIsActive()) {
+		CxbxEmbedRuntimeReportError(CXBX_EMBED_LAUNCH_FAILED, "Unhandled emulation exception.");
+		CxbxEmbedRuntimeRequestStop();
+		return;
+	}
+
 	printf("[0x%.4X] MAIN: Aborting Emulation\n", GetCurrentThreadId());
 	fflush(stdout);
 
@@ -176,10 +225,10 @@ bool EmuExceptionNonBreakpointUnhandledShow(LPEXCEPTION_POINTERS e)
 	return false;
 }
 
-// Returns weither the given address is part of an Xbox managed memory region
+// Returns whether the given address is part of an Xbox managed memory region
 bool IsXboxCodeAddress(xbox::addr_xt addr)
 {
-	// TODO : Replace the following with a (fast) check weither
+	// TODO : Replace the following with a (fast) check whether
 	// the given address lies in xbox allocated virtual memory,
 	// for example by g_VMManager.CheckConflictingVMA(addr, 0).
 	return (addr >= XBE_IMAGE_BASE) && (addr <= XBE_MAX_VA);
@@ -294,10 +343,24 @@ bool EmuTryHandleException(EXCEPTION_POINTERS *e)
 		return genericException(e);
 	}
 
-	// Do not handle exceptions from non-Xbox code (e.g. D3D11 internal guard
-	// page faults). Let those propagate to the system/runtime SEH handlers.
+	// For access violations in our own emulator code (non-Xbox), dump a stack
+	// trace so crashes are diagnosable, then let the process terminate.
 	if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION
 		&& !IsXboxCodeAddress(e->ContextRecord->Eip)) {
+		printf("\n[0x%.4X] FATAL: Access violation in emulator code at EIP=0x%.08X\n",
+			GetCurrentThreadId(), e->ContextRecord->Eip);
+		printf("  Fault address: 0x%.08X (%s)\n",
+			(DWORD)e->ExceptionRecord->ExceptionInformation[1],
+			e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read");
+		printf("  EAX=0x%.08X EBX=0x%.08X ECX=0x%.08X EDX=0x%.08X\n",
+			e->ContextRecord->Eax, e->ContextRecord->Ebx,
+			e->ContextRecord->Ecx, e->ContextRecord->Edx);
+		printf("  ESI=0x%.08X EDI=0x%.08X ESP=0x%.08X EBP=0x%.08X\n",
+			e->ContextRecord->Esi, e->ContextRecord->Edi,
+			e->ContextRecord->Esp, e->ContextRecord->Ebp);
+		CONTEXT ctx = *(e->ContextRecord);
+		EmuPrintStackTrace(&ctx);
+		fflush(stdout);
 		return false;
 	}
 
@@ -347,38 +410,7 @@ long WINAPI EmuException(struct _EXCEPTION_POINTERS* e)
 	return result;
 }
 
-// exception handle for that tough final exit :)
-// TODO: We might just well as delete this, duplicate of EmuExceptionNonBreakpointUnhandledShow
-int ExitException(LPEXCEPTION_POINTERS e)
-{
-    static int count = 0;
-
-	// debug information
-    printf("[0x%.4X] MAIN: * * * * * EXCEPTION * * * * *\n", GetCurrentThreadId());
-    printf("[0x%.4X] MAIN: Received Exception [0x%.8X]@%s\n", GetCurrentThreadId(), e->ExceptionRecord->ExceptionCode, EIPToString(e->ContextRecord->Eip).c_str());
-    printf("[0x%.4X] MAIN: * * * * * EXCEPTION * * * * *\n", GetCurrentThreadId());
-
-    fflush(stdout);
-
-    PopupFatal(nullptr, "Warning: Could not safely terminate process!");
-
-    count++;
-
-    if(count > 1)
-    {
-        PopupFatal(nullptr, "Warning: Multiple Problems!");
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    if(CxbxKrnl_hEmuParent != NULL)
-        SendMessage(CxbxKrnl_hEmuParent, WM_PARENTNOTIFY, WM_DESTROY, 0);
-
-    ExitProcess(1);
-
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-// Exception Mananger class; Any custom exceptions must be above this line.
+// Exception Manager class; Any custom exceptions must be above this line.
 ExceptionManager *g_ExceptionManager = nullptr;
 
 ExceptionManager::ExceptionManager()
@@ -428,19 +460,24 @@ bool ExceptionManager::AddVEH(unsigned long first, PVECTORED_EXCEPTION_HANDLER v
 	return isSuccess;
 }
 
-#ifdef _DEBUG
 // print call stack trace
 void EmuPrintStackTrace(PCONTEXT ContextRecord)
 {
-    static int const STACK_MAX     = 16;
-    static int const SYMBOL_MAXLEN = 64;
+    static int const STACK_MAX     = 32;
+    static int const SYMBOL_MAXLEN = 256;
 
 	// TODO: Figure out why this causes a loop of Exceptions until the process dies
     //EnterCriticalSection(&dbgCritical);
 
     IMAGEHLP_MODULE64 module = { sizeof(IMAGEHLP_MODULE) };
 
-    BOOL fSymInitialized = SymInitialize(g_CurrentProcessHandle, NULL, TRUE);
+    // Build a symbol search path that includes the executable's directory
+    char symPath[MAX_PATH * 2] = {};
+    GetModuleFileNameA(NULL, symPath, MAX_PATH);
+    char* lastSlash = strrchr(symPath, '\\');
+    if (lastSlash) *lastSlash = '\0';
+
+    BOOL fSymInitialized = SymInitialize(g_CurrentProcessHandle, symPath, TRUE);
 
     STACKFRAME64 frame = { sizeof(STACKFRAME64) };
     frame.AddrPC.Offset    = ContextRecord->Eip;
@@ -477,7 +514,7 @@ void EmuPrintStackTrace(PCONTEXT ContextRecord)
 		if (fSymInitialized)
 		{
 			PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)&symbol;
-			pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO) + SYMBOL_MAXLEN - 1;
+			pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
 			pSymbol->MaxNameLen = SYMBOL_MAXLEN;
 			if (SymFromAddr(g_CurrentProcessHandle, frame.AddrPC.Offset, &dwDisplacement, pSymbol))
 				symbolName = pSymbol->Name;
@@ -507,4 +544,147 @@ void EmuPrintStackTrace(PCONTEXT ContextRecord)
 
     // LeaveCriticalSection(&dbgCritical);
 }
+
+// Dump stack traces for all threads in the current process.
+// Used to diagnose hangs when presents stop arriving.
+void EmuDumpAllThreadStacks(const char* reason)
+{
+    static int const STACK_MAX     = 32;
+    static int const SYMBOL_MAXLEN = 256;
+
+    DWORD currentPid = GetCurrentProcessId();
+    DWORD currentTid = GetCurrentThreadId();
+
+    printf("\n======================================================\n");
+    printf("PRESENT STALL DETECTED: %s\n", reason);
+    printf("Dumping all thread stacks (PID=%lu, reporter TID=%lu)\n", currentPid, currentTid);
+    printf("======================================================\n");
+
+    // Build symbol search path
+    char symPath[MAX_PATH * 2] = {};
+    GetModuleFileNameA(NULL, symPath, MAX_PATH);
+    char* lastSlash = strrchr(symPath, '\\');
+    if (lastSlash) *lastSlash = '\0';
+
+    BOOL fSymInitialized = SymInitialize(g_CurrentProcessHandle, symPath, TRUE);
+
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        printf("  Failed to create thread snapshot (error=%lu)\n", GetLastError());
+        if (fSymInitialized) SymCleanup(g_CurrentProcessHandle);
+        return;
+    }
+
+    THREADENTRY32 te = { sizeof(THREADENTRY32) };
+    if (Thread32First(hSnapshot, &te)) {
+        do {
+            if (te.th32OwnerProcessID != currentPid) continue;
+
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                                        FALSE, te.th32ThreadID);
+            if (!hThread) continue;
+
+            printf("\n--- Thread %lu %s---\n", te.th32ThreadID,
+                   (te.th32ThreadID == currentTid) ? "(reporter) " : "");
+
+            if (te.th32ThreadID == currentTid) {
+                // Can't suspend ourselves; capture our own context
+                CONTEXT ctx = {};
+                ctx.ContextFlags = CONTEXT_FULL;
+                RtlCaptureContext(&ctx);
+                EmuPrintStackTrace(&ctx);
+            } else {
+                DWORD suspendCount = SuspendThread(hThread);
+                if (suspendCount == (DWORD)-1) {
+                    printf("  Failed to suspend (error=%lu)\n", GetLastError());
+                    CloseHandle(hThread);
+                    continue;
+                }
+
+                CONTEXT ctx = {};
+                ctx.ContextFlags = CONTEXT_FULL;
+                if (GetThreadContext(hThread, &ctx)) {
+                    // Print register state
+                    printf("  EIP=0x%08lX ESP=0x%08lX EBP=0x%08lX\n",
+                           ctx.Eip, ctx.Esp, ctx.Ebp);
+
+                    // Walk stack
+                    STACKFRAME64 frame = {};
+                    frame.AddrPC.Offset    = ctx.Eip;
+                    frame.AddrPC.Mode      = AddrModeFlat;
+                    frame.AddrFrame.Offset = ctx.Ebp;
+                    frame.AddrFrame.Mode   = AddrModeFlat;
+                    frame.AddrStack.Offset = ctx.Esp;
+                    frame.AddrStack.Mode   = AddrModeFlat;
+
+                    for (int i = 0; i < STACK_MAX; i++) {
+                        if (!StackWalk64(IMAGE_FILE_MACHINE_I386,
+                                        g_CurrentProcessHandle, hThread,
+                                        &frame, &ctx, NULL,
+                                        SymFunctionTableAccess64,
+                                        SymGetModuleBase64, NULL))
+                            break;
+
+                        IMAGEHLP_MODULE64 module = { sizeof(IMAGEHLP_MODULE) };
+                        SymGetModuleInfo64(g_CurrentProcessHandle, frame.AddrPC.Offset, &module);
+                        if (module.ModuleName)
+                            printf("  %2d: %-8s 0x%.08llX", i, module.ModuleName, frame.AddrPC.Offset);
+                        else
+                            printf("  %2d: %8c 0x%.08llX", i, ' ', frame.AddrPC.Offset);
+
+                        BYTE symbol[sizeof(SYMBOL_INFO) + SYMBOL_MAXLEN] = {};
+                        PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)symbol;
+                        pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+                        pSymbol->MaxNameLen = SYMBOL_MAXLEN;
+                        DWORD64 dwDisplacement = 0;
+                        if (fSymInitialized && SymFromAddr(g_CurrentProcessHandle,
+                                                           frame.AddrPC.Offset, &dwDisplacement, pSymbol)) {
+                            printf(" %s+0x%.04llX", pSymbol->Name, dwDisplacement);
+                        }
+                        printf("\n");
+                    }
+                } else {
+                    printf("  Failed to get context (error=%lu)\n", GetLastError());
+                }
+
+                ResumeThread(hThread);
+            }
+
+            CloseHandle(hThread);
+        } while (Thread32Next(hSnapshot, &te));
+    }
+
+    CloseHandle(hSnapshot);
+    if (fSymInitialized) SymCleanup(g_CurrentProcessHandle);
+
+    printf("======================================================\n\n");
+    fflush(stdout);
+}
+
 #endif
+
+void EmuPresentTick()
+{
+    g_LastPresentTick.store(GetTickCount64(), std::memory_order_relaxed);
+    g_PresentStallDumped.store(false, std::memory_order_relaxed);
+}
+
+void EmuCheckPresentStall(uint64_t stallThresholdMs)
+{
+    uint64_t lastTick = g_LastPresentTick.load(std::memory_order_relaxed);
+    if (lastTick == 0) return; // No present has happened yet
+
+    uint64_t now = GetTickCount64();
+    uint64_t elapsed = now - lastTick;
+    if (elapsed > stallThresholdMs) {
+        // Only dump once per stall episode
+        bool expected = false;
+        if (g_PresentStallDumped.compare_exchange_strong(expected, true)) {
+            char reason[128];
+            snprintf(reason, sizeof(reason),
+                     "No present for %.1f seconds (threshold=%.1fs)",
+                     elapsed / 1000.0, stallThresholdMs / 1000.0);
+            EmuDumpAllThreadStacks(reason);
+        }
+    }
+}

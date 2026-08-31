@@ -25,4 +25,4 @@
 #pragma once
 
 /*! xbdm thunk table */
-extern uint32_t Cxbx_LibXbdmThunkTable[1+72];
+extern uintptr_t Cxbx_LibXbdmThunkTable[1+72];

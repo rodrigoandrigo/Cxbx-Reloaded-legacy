@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -273,7 +273,8 @@ static void EmuDiskPartitionSetup(size_t partitionIndex, bool IsFile=false)
 	if (!std::filesystem::exists(partitionHeaderPath)) {
 		CxbxCreatePartitionHeaderFile(partitionHeaderPath, partitionIndex == 0);
 	}
-	partitionPath.HostBinHandle = CreateFileW(partitionHeaderPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	partitionPath.HostBinHandle = CxbxCreateHostFile(partitionHeaderPath, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
 
 	// If this path is not a raw file partition, create the directory for it
 	if (!IsFile) {
@@ -306,7 +307,8 @@ static void EmuDiskPartitionSetup(size_t partitionIndex, bool IsFile=false)
 	partitionPath.DeviceObject = DiskDeviceObject;
 
 	if (succeeded) {
-		partitionPath.HostRootHandle = CreateFileA(partitionPath.HostDevicePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		partitionPath.HostRootHandle = CxbxCreateHostFile(std::filesystem::path(partitionPath.HostDevicePath), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
 		// Force pretend has directory instead of binary partition.
 		RegisterXboxObject(DiskDeviceObject, partitionPath.HostRootHandle);
 		RegisterXboxObject<true>(DiskDeviceObject, partitionPath.HostBinHandle);
@@ -324,7 +326,7 @@ static xbox::ntstatus_xt EmuBindDeviceNameToObjectType(xbox::STRING& xTargetName
 	xbox::OBJECT_ATTRIBUTES objAttrs;
 	X_InitializeObjectAttributes(&objAttrs, &xTargetName, OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, xbox::zeroptr);
 
-	PVOID TargetDirectoryObject;
+	xbox::PVOID TargetDirectoryObject;
 	xbox::ntstatus_xt result = xbox::ObCreateObject(&ObjectType, &objAttrs, 0, &TargetDirectoryObject);
 	EmuBugCheckInline(result);
 
@@ -364,7 +366,8 @@ void EmuDiskSetup()
 
 	DiskDeviceObject->Flags &= ~X_DO_DEVICE_INITIALIZING;
 
-	NtDll::HANDLE HostRootHandle = CreateFileA(g_DiskBasePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	NtDll::HANDLE HostRootHandle = CxbxCreateHostFile(std::filesystem::path(g_DiskBasePath), GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
 	RegisterXboxObject(DiskDeviceObject, HostRootHandle);
 
 	// Setup our partitions and create them if they haven't been done.

@@ -23,6 +23,16 @@
 // *
 // ******************************************************************
 #include "../EmuD3D8_common.h"
+#include "common/CxbxEmbedRuntime.h"
+
+#if defined(CXBXR_UWP)
+extern void D3D11_init_pgraph_plugins();
+
+void CxbxSaveWindowStateForReboot() {}
+void EmuD3DInit() { D3D11_init_pgraph_plugins(); }
+void EmuD3DCleanup() {}
+DWORD WINAPI EmuRenderWindow(LPVOID) { return 0; }
+#else
 
 // Variables only used in HostDevice.cpp
 static HBRUSH g_hBgBrush = NULL; // Background Brush
@@ -590,8 +600,9 @@ LRESULT WINAPI EmuMsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
    	   	   	return DefWindowProc(hWnd, msg, wParam, lParam);
    	}
 
-   	return S_OK; // = Is not part of D3D8 handling.
+	return S_OK; // = Is not part of D3D8 handling.
 }
+#endif // !CXBXR_UWP: private Win32 render window and message loop
 
 void UpdateDepthStencilFlags(ID3D11Texture2D *pDepthStencilSurface)
 {
@@ -624,6 +635,19 @@ void SetupPresentationParameters
 )
 {
    	auto& params = g_EmuCDPD.HostPresentationParameters;
+
+#if defined(CXBXR_UWP)
+	const auto* presentation = CxbxEmbedRuntimeGetD3D11Presentation();
+	if (!presentation || !presentation->width || !presentation->height) {
+		CxbxrAbort("UWP embedding requires host presentation dimensions.");
+	}
+	params.Windowed = TRUE;
+	params.BackBufferWidth = presentation->width;
+	params.BackBufferHeight = presentation->height;
+	params.FullScreen_RefreshRateInHz = 0;
+	(void)pXboxPresentationParameters;
+	return;
+#endif
 
    	params.Windowed = !g_XBVideo.bFullScreen;
 

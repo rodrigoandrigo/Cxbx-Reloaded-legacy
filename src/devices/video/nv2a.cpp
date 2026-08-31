@@ -122,6 +122,16 @@ static void update_irq(NV2AState *d)
 	}
 	else {
 		HalSystemInterrupts[3].Assert(false);
+		// PGRAPH INTR_ERROR (InsertCallback) stalls the GPU pipeline on real
+		// hardware until the CPU acknowledges it. If the ISR temporarily
+		// disabled NV_PMC_INTR_EN_0 (standard ISR prologue), we still need
+		// the DPC thread awake to re-fire the ISR once PMC is re-enabled.
+		// Without this, the puller blocks forever waiting for an ack that
+		// never comes because the DPC thread is asleep.
+		if (d->pgraph.pending_interrupts & NV_PGRAPH_INTR_ERROR) {
+			extern void KeSignalVBlankPending();
+			KeSignalVBlankPending();
+		}
 	}
 }
 
@@ -135,12 +145,14 @@ static void update_irq(NV2AState *d)
 #define DEBUG_WRITE32(DEV)             EmuLog(LOG_LEVEL::DEBUG, "Wr32 NV2A " #DEV "(0x%08X, 0x%08X) [Handled %s]", addr, value, DebugNV_##DEV(addr))
 #define DEBUG_WRITE32_UNHANDLED(DEV) { EmuLog(LOG_LEVEL::DEBUG, "Wr32 NV2A " #DEV "(0x%08X, 0x%08X) [Unhandled %s]", addr, value, DebugNV_##DEV(addr)); return; }
 
-#define DEVICE_READ32(DEV) uint32_t EmuNV2A_##DEV##_Read32(NV2AState *d, xbox::addr_xt addr)
+#define DEVICE_READ32_NAME(DEV) EmuNV2A_##DEV##_Read32
+#define DEVICE_READ32(DEV) uint32_t DEVICE_READ32_NAME(DEV)(NV2AState *d, xbox::addr_xt addr)
 #define DEVICE_READ32_SWITCH() uint32_t result = 0; switch (addr) 
 #define DEVICE_READ32_REG(dev) result = d->dev.regs[RI(addr)]
 #define DEVICE_READ32_END(DEV) DEBUG_READ32(DEV); return result
 
-#define DEVICE_WRITE32(DEV) void EmuNV2A_##DEV##_Write32(NV2AState *d, xbox::addr_xt addr, uint32_t value)
+#define DEVICE_WRITE32_NAME(DEV) EmuNV2A_##DEV##_Write32
+#define DEVICE_WRITE32(DEV) void DEVICE_WRITE32_NAME(DEV)(NV2AState *d, xbox::addr_xt addr, uint32_t value)
 #define DEVICE_WRITE32_REG(dev) d->dev.regs[RI(addr)] = value
 #define DEVICE_WRITE32_END(DEV) DEBUG_WRITE32(DEV)
 
@@ -233,57 +245,71 @@ uint32_t NV2ADevice::ResolveDmaBaseAddress(NV2AState *d, xbox::addr_xt dma_obj_a
 const NV2ABlockInfo regions[] = { // blocktable
 
 // Note : Avoid designated initializers to facilitate C++ builds
-#define ENTRY(OFFSET, SIZE, NAME, RDFUNC, WRFUNC) \
+#define ENTRY(OFFSET, SIZE, NAME) \
 	{ \
         #NAME, OFFSET, SIZE, \
-        { RDFUNC, WRFUNC }, \
+        { DEVICE_READ32_NAME(NAME), DEVICE_WRITE32_NAME(NAME) }, \
+    }, \
+
+#define ENTRY_MIRROR(OFFSET, SIZE, NAME, MIRROR) \
+	{ \
+        #NAME, OFFSET, SIZE, \
+        { DEVICE_READ32_NAME(MIRROR), DEVICE_WRITE32_NAME(MIRROR) }, \
+    }, \
+	
+#define ENTRY_END(OFFSET, SIZE, NAME) \
+	{ \
+        #NAME, OFFSET, SIZE, \
+        { nullptr, nullptr }, \
     }, \
 
 	/* card master control */
-	ENTRY(0x000000, 0x001000, PMC, EmuNV2A_PMC_Read32, EmuNV2A_PMC_Write32)
+	ENTRY(0x000000, 0x001000, PMC)
 	/* bus control */
-	ENTRY(0x001000, 0x001000, PBUS, EmuNV2A_PBUS_Read32, EmuNV2A_PBUS_Write32)
+	ENTRY(0x001000, 0x001000, PBUS)
 	/* MMIO and DMA FIFO submission to PGRAPH and VPE */
-	ENTRY(0x002000, 0x002000, PFIFO, EmuNV2A_PFIFO_Read32, EmuNV2A_PFIFO_Write32)
+	ENTRY(0x002000, 0x002000, PFIFO)
 	/* access to BAR0/BAR1 from real mode */
-	ENTRY(0x007000, 0x001000, PRMA, EmuNV2A_PRMA_Read32, EmuNV2A_PRMA_Write32)
+	ENTRY(0x007000, 0x001000, PRMA)
 	/* video overlay */
-	ENTRY(0x008000, 0x001000, PVIDEO, EmuNV2A_PVIDEO_Read32, EmuNV2A_PVIDEO_Write32)
+	ENTRY(0x008000, 0x001000, PVIDEO)
 	/* time measurement and time-based alarms */
-	ENTRY(0x009000, 0x001000, PTIMER, EmuNV2A_PTIMER_Read32, EmuNV2A_PTIMER_Write32)
+	ENTRY(0x009000, 0x001000, PTIMER)
 	/* performance monitoring counters */
-	ENTRY(0x00a000, 0x001000, PCOUNTER, EmuNV2A_PCOUNTER_Read32, EmuNV2A_PCOUNTER_Write32)
+	ENTRY(0x00a000, 0x001000, PCOUNTER)
 	/* MPEG2 decoding engine */
-	ENTRY(0x00b000, 0x001000, PVPE, EmuNV2A_PVPE_Read32, EmuNV2A_PVPE_Write32)
+	ENTRY(0x00b000, 0x001000, PVPE)
 	/* TV encoder */
-	ENTRY(0x00d000, 0x001000, PTV, EmuNV2A_PTV_Read32, EmuNV2A_PTV_Write32)
+	ENTRY(0x00d000, 0x001000, PTV)
 	/* aliases VGA memory window */
-	ENTRY(0x0a0000, 0x020000, PRMFB, EmuNV2A_PRMFB_Read32, EmuNV2A_PRMFB_Write32)
+	ENTRY(0x0a0000, 0x020000, PRMFB)
 	/* aliases VGA sequencer and graphics controller registers */
-	ENTRY(0x0c0000, 0x008000, PRMVIO, EmuNV2A_PRMVIO_Read32, EmuNV2A_PRMVIO_Write32) // Size was 0x001000
+	ENTRY(0x0c0000, 0x008000, PRMVIO) // Size was 0x001000
 	/* memory interface */
-	ENTRY(0x100000, 0x001000, PFB, EmuNV2A_PFB_Read32, EmuNV2A_PFB_Write32)
+	ENTRY(0x100000, 0x001000, PFB)
 	/* straps readout / override */
-	ENTRY(0x101000, 0x001000, PSTRAPS, EmuNV2A_PSTRAPS_Read32, EmuNV2A_PSTRAPS_Write32)
+	ENTRY(0x101000, 0x001000, PSTRAPS)
 	/* accelerated 2d/3d drawing engine */
-	ENTRY(0x400000, 0x002000, PGRAPH, EmuNV2A_PGRAPH_Read32, EmuNV2A_PGRAPH_Write32)
+	ENTRY(0x400000, 0x002000, PGRAPH)
 	/* more CRTC controls */
-	ENTRY(0x600000, 0x001000, PCRTC, EmuNV2A_PCRTC_Read32, EmuNV2A_PCRTC_Write32)
+	ENTRY(0x600000, 0x001000, PCRTC)
 	/* aliases VGA CRTC and attribute controller registers */
-	ENTRY(0x601000, 0x001000, PRMCIO, EmuNV2A_PRMCIO_Read32, EmuNV2A_PRMCIO_Write32)
+	ENTRY(0x601000, 0x001000, PRMCIO)
 	/* RAMDAC, cursor, and PLL control */
-	ENTRY(0x680000, 0x001000, PRAMDAC, EmuNV2A_PRAMDAC_Read32, EmuNV2A_PRAMDAC_Write32)
+	ENTRY(0x680000, 0x001000, PRAMDAC)
 	/* aliases VGA palette registers */
-	ENTRY(0x681000, 0x001000, PRMDIO, EmuNV2A_PRMDIO_Read32, EmuNV2A_PRMDIO_Write32)
+	ENTRY(0x681000, 0x001000, PRMDIO)
 	/* RAMIN access */
-	ENTRY(0x700000, 0x100000, PRAMIN, EmuNV2A_PRAMIN_Read32, EmuNV2A_PRAMIN_Write32)
+	ENTRY(0x700000, 0x100000, PRAMIN)
 	/* PFIFO MMIO and DMA submission area */
-	ENTRY(0x800000, 0x400000, USER, EmuNV2A_USER_Read32, EmuNV2A_USER_Write32) // Size was 0x800000
+	ENTRY(0x800000, 0x400000, USER) // Size was 0x800000
 	/* UREMAP User area mirror - TODO : Confirm */
-	ENTRY(0xC00000, 0x400000, UREMAP, EmuNV2A_USER_Read32, EmuNV2A_USER_Write32) // NOTE : Mirror of USER
+	ENTRY_MIRROR(0xC00000, 0x400000, UREMAP, USER) // NOTE : Mirror of USER
 	/* Terminating entry */
-	ENTRY(0xFFFFFF, 0x000000, END, nullptr, nullptr)
+	ENTRY_END(0xFFFFFF, 0x000000, END)
 #undef ENTRY
+#undef ENTRY_MIRROR
+#undef ENTRY_END
 };
 
 const NV2ABlockInfo* EmuNV2A_Block(xbox::addr_xt addr)
@@ -335,6 +361,56 @@ void nv2a_vblank_interrupt(void *opaque)
 #define NV_PRAMIN_ADDR   0x00700000
 #define NV_PRAMIN_SIZE              0x100000
 
+// Flat MMIO backing storage — 16 MiB reserved, only engine block pages committed.
+uint8_t* g_pNV2AMMIO = nullptr;
+
+static void CxbxAllocateFlatMMIO(NV2AState *d)
+{
+	// Reserve 16 MiB virtual address space (no physical memory committed yet)
+	g_pNV2AMMIO = (uint8_t*)VirtualAlloc(nullptr, NV2A_MMIO_TOTAL_SIZE,
+		MEM_RESERVE, PAGE_NOACCESS);
+	if (!g_pNV2AMMIO) {
+		CxbxrAbort("VirtualAlloc failed to reserve NV2A flat MMIO buffer (16 MiB). Error 0x%08X", GetLastError());
+	}
+
+	// Commit only the pages where actual register blocks reside
+	struct { uint32_t offset; uint32_t size; } blocks[] = {
+		{ NV2A_MMIO_OFF_PMC,     NV_PMC_REGS_BYTES },      // 4 KB
+		{ NV2A_MMIO_OFF_PFIFO,   NV_PFIFO_REGS_BYTES },    // 8 KB
+		{ NV2A_MMIO_OFF_PVIDEO,  NV_PVIDEO_REGS_BYTES },   // 4 KB
+		{ NV2A_MMIO_OFF_PTIMER,  NV_PTIMER_REGS_BYTES },   // 4 KB
+		{ NV2A_MMIO_OFF_PFB,     NV_PFB_REGS_BYTES },      // 4 KB
+		{ NV2A_MMIO_OFF_PGRAPH,  NV_PGRAPH_REGS_BYTES },   // 8 KB
+		{ NV2A_MMIO_OFF_PCRTC,   NV_PCRTC_REGS_BYTES },    // 4 KB
+		{ NV2A_MMIO_OFF_PRAMDAC, NV_PRAMDAC_REGS_BYTES },  // 4 KB
+	};
+
+	for (auto& blk : blocks) {
+		LPVOID ret = VirtualAlloc(g_pNV2AMMIO + blk.offset, blk.size,
+			MEM_COMMIT, PAGE_READWRITE);
+		if (!ret) {
+			CxbxrAbort("VirtualAlloc failed to commit NV2A MMIO block at offset 0x%06X (size %u). Error 0x%08X",
+				blk.offset, blk.size, GetLastError());
+		}
+	}
+
+	// Point each struct's regs pointer into the flat buffer
+	d->pmc.regs     = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PMC);
+	d->pfifo.regs   = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PFIFO);
+	d->pvideo.regs  = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PVIDEO);
+	d->ptimer.regs  = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PTIMER);
+	d->pfb.regs     = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PFB);
+	d->pgraph.regs  = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PGRAPH);
+	d->pcrtc.regs   = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PCRTC);
+	d->pramdac.regs = (uint32_t*)(g_pNV2AMMIO + NV2A_MMIO_OFF_PRAMDAC);
+
+	printf("[0x%.4X] INIT: NV2A flat MMIO buffer reserved at %p (16 MiB, %zu KB committed)\n",
+		GetCurrentThreadId(), g_pNV2AMMIO,
+		(NV_PMC_REGS_BYTES + NV_PFIFO_REGS_BYTES + NV_PVIDEO_REGS_BYTES +
+		 NV_PTIMER_REGS_BYTES + NV_PFB_REGS_BYTES + NV_PGRAPH_REGS_BYTES +
+		 NV_PCRTC_REGS_BYTES + NV_PRAMDAC_REGS_BYTES) / 1024);
+}
+
 void CxbxReserveNV2AMemory(NV2AState *d)
 {
 	// The NV2A memory was reserved already by the loader!
@@ -355,6 +431,9 @@ void CxbxReserveNV2AMemory(NV2AState *d)
 
 	printf("[0x%.4X] INIT: Allocated %d MiB of Xbox NV2A PRAMIN memory at 0x%.8x to 0x%.8x\n",
 		GetCurrentThreadId(), d->pramin.ramin_size / ONE_MB, (uintptr_t)d->pramin.ramin_ptr, (uintptr_t)d->pramin.ramin_ptr + d->pramin.ramin_size - 1);
+
+	// Allocate flat MMIO backing buffer and point struct regs pointers into it
+	CxbxAllocateFlatMMIO(d);
 }
 
 /* NV2ADevice */
@@ -390,6 +469,7 @@ void NV2ADevice::Init()
 	
 	m_DeviceId = 0x02A5;
 	m_VendorId = PCI_VENDOR_ID_NVIDIA;
+	m_RevisionAndClassCode = 0x030000A1; // VGA-compatible display controller, rev A1
 
 	NV2AState *d = m_nv2a_state; // glue
 
@@ -402,6 +482,11 @@ void NV2ADevice::Init()
 	// the ISR can see pending interrupts from the start.
 	d->pmc.enabled_interrupts = NV_PMC_INTR_EN_0_HARDWARE;
 	d->pcrtc.enabled_interrupts = NV_PCRTC_INTR_0_VBLANK;
+	// Enable all PGRAPH interrupt sources - LoadEngines writes 0xFFFFFFFF to
+	// NV_PGRAPH_INTR_EN during D3D init, but the MMIO write may arrive after
+	// the first pushbuffer commands. Pre-enable so NV097_NO_OPERATION's
+	// interrupt handshake works from the first Swap.
+	d->pgraph.enabled_interrupts = 0xFFFFFFFF;
 
 	d->vram_ptr = (uint8_t*)PHYSICAL_MAP_BASE;
 	d->vram_size = g_SystemMaxMemory;
@@ -418,12 +503,50 @@ void NV2ADevice::Init()
 	d->vblank_cb = nv2a_vblank_interrupt;
 
     qemu_mutex_init(&d->pfifo.pfifo_lock);
-    qemu_cond_init(&d->pfifo.puller_cond);
+    d->pfifo.puller_event = CreateEvent(NULL, FALSE, FALSE, NULL); // auto-reset
     qemu_cond_init(&d->pfifo.pusher_cond);
     qemu_cond_init(&d->pfifo.flush_complete_cond);
     d->pfifo.flush_requested = false;
 
     d->pfifo.regs[RI(NV_PFIFO_CACHE1_STATUS)] |= NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+
+    // Initialize RAMHT/RAMFC registers to match what the read handlers return.
+    // On real Xbox hardware these are programmed by the BIOS during boot.
+    // The D3D runtime reads these to find the RAMHT/RAMFC locations in PRAMIN
+    // and writes entries there; ramht_lookup must use the same values internally.
+    d->pfifo.regs[RI(NV_PFIFO_RAMHT)] = 0x03000100;
+    d->pfifo.regs[RI(NV_PFIFO_RAMFC)] = 0x00890110;
+
+    // Populate RAMHT with handle→instance mappings.
+    // On real Xbox the BIOS creates these entries; we emulate that here.
+    // RAMHT is at PRAMIN offset 0x10000 (4KB, 512 entries × 8 bytes).
+    // Hash for handles < 2048 with channel_id=0 is just the handle value.
+    // Entry format: word0=handle, word1=context (valid|engine|instance).
+    {
+        struct { uint32_t handle; uint32_t pramin_offset; } ramht_entries[] = {
+            { 0x02, 0x60 },  // DMA_TO_MEMORY: error notifier (small, base=0x03FD6020)
+            { 0x03, 0x10 },  // DMA_FROM_MEMORY: textures/vertices (all VRAM)
+            { 0x04, 0x30 },  // Bidirectional: state context (all VRAM)
+            { 0x07, 0x70 },  // Bidirectional: extended notifier (small, base=0x03FD6040)
+            { 0x08, 0x90 },  // Bidirectional: semaphore/fence (base=0x03FD6000, limit=0x20)
+            { 0x09, 0x20 },  // DMA_TO_MEMORY: color render target (all VRAM)
+            { 0x0A, 0x40 },  // Bidirectional: zeta/depth buffer (all VRAM)
+            { 0x0B, 0xA0 },  // DMA_FROM_MEMORY: second read context (all VRAM)
+            { 0x0C, 0x80 },  // Bidirectional: report/occlusion query (256MB)
+            { 0x11, 0x10 },  // DMA_FROM_MEMORY: vertex read (shares with handle 3)
+            { 0x19, 0x80 },  // Bidirectional: catch-all init DMA (256MB)
+        };
+
+        const uint32_t ramht_base = 0x10000; // PRAMIN offset of RAMHT
+        for (auto& e : ramht_entries) {
+            uint32_t hash = e.handle; // For handles < 2048 with channel_id=0
+            uint32_t context = NV_RAMHT_STATUS | NV_RAMHT_ENGINE_GRAPHICS
+                             | (e.pramin_offset >> 4);
+            uint8_t *entry_ptr = d->pramin.ramin_ptr + ramht_base + hash * 8;
+            *(uint32_t*)(entry_ptr + 0) = e.handle;
+            *(uint32_t*)(entry_ptr + 4) = context;
+        }
+    }
 
     // FIFO threads are started later by StartFifoThreads(), after the host
     // D3D11 device has been created (the puller thread calls D3D11 APIs).
@@ -443,11 +566,14 @@ void NV2ADevice::Reset()
 
 	d->exiting = true;
 
-	qemu_cond_broadcast(&d->pfifo.puller_cond);
+	SetEvent(d->pfifo.puller_event);
+	qemu_mutex_lock(&d->pfifo.pfifo_lock);
 	qemu_cond_broadcast(&d->pfifo.pusher_cond);
 	qemu_cond_broadcast(&d->pfifo.flush_complete_cond);
+	qemu_mutex_unlock(&d->pfifo.pfifo_lock);
 	d->pfifo.puller_thread.join();
 	d->pfifo.pusher_thread.join();
+	CloseHandle(d->pfifo.puller_event);
 	qemu_mutex_destroy(&d->pfifo.pfifo_lock); // Cxbxr addition
 
 	pgraph_destroy(&d->pgraph);
@@ -603,50 +729,45 @@ int NV2ADevice::GetFrameWidth(NV2AState* d)
 	return width;
 }
 
-uint64_t NV2ADevice::vblank_next(uint64_t now)
+uint64_t NV2ADevice::vblank_tick(uint64_t now)
 {
-	// Derive VBlank period from CRT timing registers (same formula as PCRTC_RASTER).
-	// This unifies VBlank interrupt cadence with the display mode the game configured,
-	// supporting both NTSC (~60Hz) and PAL (~50Hz) modes automatically.
+	// PCRTC always fires VBlank at the NTSC rate (~59.94Hz / ~16.67ms).
+	// Some PAL games (e.g. Dead or Alive Ultimate) disable PCRTC VBlank and
+	// instead use PTIMER to generate VBlank interrupts at 50Hz, suggesting
+	// that PCRTC can only trigger VBlanks at the NTSC frequency.
 	NV2AState *d = m_nv2a_state;
-	unsigned int totalLines = pcrtc_get_total_lines(d);
-	unsigned int refreshRate = pcrtc_get_refresh_rate(d, totalLines);
-	// Period in microseconds: 1000000 / refreshRate
-	uint64_t vblank_period = 1000000 / refreshRate;
+	// ~59.94Hz in QPC ticks: freq * 16667 / 1000000
+	const int64_t vblank_period = HostQPCFrequency * 16667 / 1000000;
 
 	uint64_t next = d->vblank_last + vblank_period;
 
 	if (now >= next) {
-		// Record QPC timestamp *before* firing the callback so PCRTC_RASTER
-		// can compute scanline position relative to this VBlank.
-		LARGE_INTEGER qpc;
-		QueryPerformanceCounter(&qpc);
+		// Use the absolute QPC from HostLastQPC (set by get_now() moments
+		// before) for PCRTC_RASTER scanline position and jitter profiling.
+		int64_t qpcNow = HostLastQPC.load(std::memory_order_relaxed);
 
 		// Measure VBlank jitter: how late (or early) did we fire vs ideal?
 		if (g_bCxbxProfilerEnabled) {
 			int64_t lastQPC = d->vblank_last_qpc.load(std::memory_order_acquire);
 			if (lastQPC > 0) {
-				LARGE_INTEGER freq;
-				QueryPerformanceFrequency(&freq);
-				LONGLONG idealTicks = freq.QuadPart / refreshRate;
-				LONGLONG actualTicks = qpc.QuadPart - lastQPC;
-				LONGLONG jitterTicks = actualTicks > idealTicks
-					? actualTicks - idealTicks : idealTicks - actualTicks;
+				LONGLONG actualTicks = qpcNow - lastQPC;
+				LONGLONG jitterTicks = actualTicks > vblank_period
+					? actualTicks - vblank_period : vblank_period - actualTicks;
 				InterlockedAdd64(&g_ProfileAccum[PROF_VBLANK_JITTER], jitterTicks);
 			}
 		}
 
-		d->vblank_last_qpc.store(qpc.QuadPart, std::memory_order_release);
+		d->vblank_last_qpc.store(qpcNow, std::memory_order_release);
 
 		d->vblank_cb(d);
-		d->vblank_last = get_now();
-		return vblank_period;
+		d->vblank_last = now;
+		return now + vblank_period;
 	}
 
-	return d->vblank_last + vblank_period - now; // time remaining until next vblank
+	return next;
 }
 
-uint64_t NV2ADevice::ptimer_next(uint64_t now)
+uint64_t NV2ADevice::ptimer_tick(uint64_t now)
 {
 	// Test case: Dead or Alive Ultimate uses this when in PAL50 mode only
 	if (m_nv2a_state->ptimer_active) {
@@ -664,11 +785,11 @@ uint64_t NV2ADevice::ptimer_next(uint64_t now)
 				extern void KeSignalVBlankPending();
 				KeSignalVBlankPending();
 			}
-			m_nv2a_state->ptimer_last = get_now();
-			return ptimer_period;
+			m_nv2a_state->ptimer_last = now;
+			return now + ptimer_period;
 		}
 
-		return m_nv2a_state->ptimer_last + ptimer_period - now; // time remaining until next ptimer interrupt
+		return next;
 	}
 
 	return -1;

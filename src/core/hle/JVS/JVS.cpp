@@ -38,6 +38,7 @@
 #include "core\hle\Intercept.hpp"
 #include "devices\chihiro\JvsIo.h"
 #include "devices\Xbox.h"
+#include <SDL3/SDL_keyboard.h>
 #include <thread>
 
 #pragma warning(disable:4244) // Silence mio compiler warnings
@@ -149,8 +150,9 @@ void JvsInputThread()
 	while (true) {
 		// This thread is responsible for reading the emulated Baseboard state
 		// and setting the correct internal variables
-		ChihiroBaseBoardState.TestButton = GetAsyncKeyState(VK_F1);
-		ChihiroBaseBoardState.ServiceButton = GetAsyncKeyState(VK_F2);
+		const bool* keyboardState = SDL_GetKeyboardState(nullptr);
+		ChihiroBaseBoardState.TestButton = keyboardState[SDL_SCANCODE_F1];
+		ChihiroBaseBoardState.ServiceButton = keyboardState[SDL_SCANCODE_F2];
 
 		// Call into the Jvs I/O board update function
 		g_pJvsIo->Update();

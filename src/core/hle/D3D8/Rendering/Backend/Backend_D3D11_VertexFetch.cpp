@@ -33,7 +33,8 @@
 #include "common/AddressRanges.h"
 #include "core\hle\D3D8\XbVertexBuffer.h"
 #include "core\hle\D3D8\XbConvert.h"
-#include "core\hle\D3D8\XbPushBuffer.h" // NV2A_get_vertex_attribute_value_pointer
+#include "core\hle\D3D8\XbPushBuffer.h" // CxbxDrawContext (via XbVertexBuffer.h)
+#include "core\hle\D3D8\Rendering\IndexBufferConvert.h" // CxbxGetClockWiseWindingOrder
 #include "devices\Xbox.h"              // For extern NV2ADevice* g_NV2A
 #include "devices\video\nv2a.h"        // For NV2AState, PGRAPHState, VertexAttribute, nv2a_regs.h
 
@@ -215,22 +216,9 @@ static UINT                      s_LayoutCBGeneration = 0;
 static UINT                      s_LastLayoutCBGeneration = UINT_MAX;
 
 // ******************************************************************
-// * Layout constant buffer structure (must match CxbxVertexLayoutCB in HLSL)
+// * Layout constant buffer structure (shared with HLSL via CxbxVertexFetchLayout.hlsli)
 // ******************************************************************
-struct VertexFetchLayoutCB {
-	// Header: 8 uints (32 bytes, matches HLSL CxbxVertexLayoutCB)
-	UINT PrimType;        // 0=normal, 1=quad, 2=fan, 3=quadstrip, 4=lineloop
-	UINT IndexedDraw;     // 0=non-indexed, 1=indexed 16-bit, 2=indexed 32-bit
-	UINT IndexOffset;     // Byte offset into index data
-	UINT NumAttribs;      // Number of active attributes
-	UINT NumVerts;        // Original Xbox vertex count (for lineloop wrap)
-	UINT VertexOffset;    // Added to each resolved vertex index before VB fetch
-	                      //   Non-indexed: StartVertex
-	                      //   Indexed: BaseVertexIndex
-	UINT Pad6;
-	UINT Pad7;
-	UINT Attribs[16][4];  // Per-attribute: elemOffset, stride, format, streamBase
-};
+#include "core\hle\D3D8\Rendering\Shaders\CxbxVertexFetchLayout.hlsli"
 
 // ******************************************************************
 // * Map NV2A hardware format + count to CXBX_VTXFMT_* constant
@@ -291,13 +279,25 @@ void CxbxD3D11VertexFetchInit()
 {
 	HRESULT hr;
 
-	// Layout CB (b1) — 32 + 256 = 288 bytes
+	// Layout CB (b1) — 32 + 256 = 288 bytes.
+	// Must be DYNAMIC: the inline buffer path (CxbxD3D11DrawInlineBuffer) uses
+	// Map/WRITE_DISCARD to fill this buffer directly. Creating as DEFAULT would
+	// cause Map() to fail silently, breaking inline buffer draws.
+	//
+	// Performance note (benchmarked DolphinClassic 25s):
+	//   Map/WRITE_DISCARD on a 288-byte DYNAMIC CB is equivalent in throughput to
+	//   UpdateSubresource on a DEFAULT CB for this buffer size. The regular draw
+	//   path uses Map/Unmap for consistency with the inline buffer path.
 	hr = CxbxD3D11CreateConstantBuffer(sizeof(VertexFetchLayoutCB), true, &s_pLayoutCB);
 	if (FAILED(hr))
 		EmuLog(LOG_LEVEL::WARNING, "VertexFetchInit: Failed to create layout CB");
 
-	// Defaults CB (b2) — 16 × float4 = 256 bytes
-	hr = CxbxD3D11CreateConstantBuffer(16 * 4 * sizeof(float), true, &s_pDefaultsCB);
+	// Defaults CB (b2) — 16 × float4 = 256 bytes.
+	// Kept as DEFAULT + UpdateSubresource: benchmarking showed Map/WRITE_DISCARD
+	// was ~20% slower for this buffer (537-548 fps vs 656-708 fps). The driver
+	// DMA-copies small DEFAULT payloads from the command buffer without allocation
+	// overhead, which outperforms the rename-on-Map path here.
+	hr = CxbxD3D11CreateConstantBuffer(16 * 4 * sizeof(float), false, &s_pDefaultsCB);
 	if (FAILED(hr))
 		EmuLog(LOG_LEVEL::WARNING, "VertexFetchInit: Failed to create defaults CB");
 }
@@ -390,21 +390,20 @@ static void UploadVertexDefaults()
 
 	// Compare actual attribute values to skip Map/Unmap when nothing changed
 	static float s_CachedDefaults[16 * 4] = {};
+	PGRAPHState* pg = (g_NV2A != nullptr) ? &g_NV2A->GetDeviceState()->pgraph : nullptr;
+	if (!pg) return;
+
 	static bool s_FirstCall = true;
 	bool changed = s_FirstCall;
 	for (int i = 0; i < 16 && !changed; i++) {
-		const float* pSrc = NV2A_get_vertex_attribute_value_pointer(i);
+		const float* pSrc = pg->vertex_attributes[i].inline_value;
 		if (std::memcmp(pSrc, &s_CachedDefaults[i * 4], sizeof(float) * 4) != 0)
 			changed = true;
 	}
 	if (!changed) return;
 	s_FirstCall = false;
 
-	D3D11_MAPPED_SUBRESOURCE mapped = {};
-	HRESULT hr = g_pD3DDeviceContext->Map(s_pDefaultsCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-	if (FAILED(hr)) return;
-
-	float* pDst = (float*)mapped.pData;
+	float defaults[16 * 4];
 	for (int i = 0; i < 16; i++) {
 		// TODO: NV2A hardware updates inline_value[] with the last vertex's data
 		// after each streamed draw, so a subsequent draw that doesn't stream an
@@ -413,15 +412,15 @@ static void UploadVertexDefaults()
 		// (NV097_SET_VERTEX_DATA4F etc.), not by the streamed vertex path.  To fix
 		// this, after each draw we'd need to read back the last vertex's attribute
 		// values from the CPU-side vertex data and write them to inline_value[].
-		const float* pSrc = NV2A_get_vertex_attribute_value_pointer(i);
-		pDst[i * 4 + 0] = pSrc[0];
-		pDst[i * 4 + 1] = pSrc[1];
-		pDst[i * 4 + 2] = pSrc[2];
-		pDst[i * 4 + 3] = pSrc[3];
+		const float* pSrc = pg->vertex_attributes[i].inline_value;
+		defaults[i * 4 + 0] = pSrc[0];
+		defaults[i * 4 + 1] = pSrc[1];
+		defaults[i * 4 + 2] = pSrc[2];
+		defaults[i * 4 + 3] = pSrc[3];
 		std::memcpy(&s_CachedDefaults[i * 4], pSrc, sizeof(float) * 4);
 	}
 
-	g_pD3DDeviceContext->Unmap(s_pDefaultsCB, 0);
+	g_pD3DDeviceContext->UpdateSubresource(s_pDefaultsCB, 0, nullptr, defaults, 0, 0);
 }
 
 // ******************************************************************
@@ -462,6 +461,25 @@ void CxbxD3D11VertexFetchDraw(CxbxDrawContext& DrawContext)
 	{
 		CXBX_PROFILE_SCOPE(PROF_PAGE_FLUSH);
 		CxbxPageTrackerFlushToGPU();
+	}
+
+	// ---------------------------------------------------------------
+	// Step 2a: Flush GPU-dirty RT pages that overlap VB streams
+	// ---------------------------------------------------------------
+	// When a game renders to a surface then reads it back as a vertex buffer
+	// (e.g. DisplacementMap XDK sample using XGSetVertexBufferHeader), the
+	// D3D11 RT content must be read back to Xbox RAM and re-uploaded to the
+	// GPU mirror before the vertex shader can fetch correct data.
+	if (!bIsUPDraw && g_NV2A != nullptr) {
+		PGRAPHState* pgVB = &g_NV2A->GetDeviceState()->pgraph;
+		for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
+			const VertexAttribute& attr = pgVB->vertex_attributes[i];
+			if (attr.count == 0) continue;
+			uint32_t vbOffset = NV2AResolveVertexPhysicalAddress(g_NV2A->GetDeviceState(), attr.dma_select, (uint32_t)attr.offset);
+			uint32_t vbSize = attr.stride * DrawContext.dwVertexCount;
+			if (vbSize == 0) continue;
+			CxbxPageTrackerFlushGPUDirtyToMirror(vbOffset, vbSize);
+		}
 	}
 
 	// ---------------------------------------------------------------
@@ -550,33 +568,31 @@ void CxbxD3D11VertexFetchDraw(CxbxDrawContext& DrawContext)
 		if (!layoutDirty) goto skip_layout_upload;
 	}
 	{
-		D3D11_MAPPED_SUBRESOURCE mapped = {};
-		HRESULT hr = g_pD3DDeviceContext->Map(s_pLayoutCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-		if (FAILED(hr)) return;
+		VertexFetchLayoutCB cb = {};
 
-		VertexFetchLayoutCB* pCB = (VertexFetchLayoutCB*)mapped.pData;
-		memset(pCB, 0, sizeof(VertexFetchLayoutCB));
-
-		pCB->PrimType = primType;
-		pCB->IndexedDraw = indexedDraw;
-		pCB->IndexOffset = indexOffset;
-		pCB->NumAttribs = 16; // Always provide all 16 attribute descriptors
-		pCB->NumVerts = DrawContext.dwVertexCount; // Original vertex count (for lineloop)
+		cb.PrimType = primType;
+		cb.IndexedDraw = indexedDraw;
+		cb.IndexOffset = indexOffset;
+		cb.NumAttribs = 16; // Always provide all 16 attribute descriptors
+		cb.NumVerts = DrawContext.dwVertexCount; // Original vertex count (for lineloop)
 
 		// VertexOffset: adjusts the resolved vertex index before VB fetch.
 		// Non-indexed draws: StartVertex (DrawVertices skips the first N vertices).
 		// Indexed draws: BaseVertexIndex (SetIndices offset added to each index).
 		if (indexedDraw)
-			pCB->VertexOffset = DrawContext.dwBaseVertexIndex;
+			cb.VertexOffset = DrawContext.dwBaseVertexIndex;
 		else
-			pCB->VertexOffset = vertexStart;
+			cb.VertexOffset = vertexStart;
+
+		// Quad winding: must match NV2A SETUPRASTER front face setting
+		cb.WindingCW = CxbxGetClockWiseWindingOrder() ? 1 : 0;
 
 		// Fill per-attribute descriptors — default all to NONE (use sticky defaults)
 		for (UINT a = 0; a < 16; a++) {
-			pCB->Attribs[a][0] = 0;  // elemOffset
-			pCB->Attribs[a][1] = 0;  // stride
-			pCB->Attribs[a][2] = CXBX_VTXFMT_NONE; // format — default is "use default value"
-			pCB->Attribs[a][3] = 0;  // streamBase
+			cb.Attribs[a][0] = 0;  // elemOffset
+			cb.Attribs[a][1] = 0;  // stride
+			cb.Attribs[a][2] = CXBX_VTXFMT_NONE; // format — default is "use default value"
+			cb.Attribs[a][3] = 0;  // streamBase
 		}
 
 		// PGRAPH path: reads vertex_attributes[] directly from NV2A state.
@@ -589,34 +605,42 @@ void CxbxD3D11VertexFetchDraw(CxbxDrawContext& DrawContext)
 				// NV2A inline_array path: data is packed contiguously per vertex
 				// with enabled attributes in register order. Compute element offsets
 				// from attribute sizes rather than using physical addresses.
+				// Push buffer data is DWORD-granular, so each attribute is padded
+				// to the next 4-byte boundary (matters for SHORT3, PBYTE3, etc.).
 				UINT packedOffset = 0;
 				for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
 					const VertexAttribute& attr = pg->vertex_attributes[i];
-				if (attr.count == 0) continue; // count 0 = disabled (format 0 is valid: UB_D3D/D3DCOLOR)
-					pCB->Attribs[i][0] = packedOffset; // elemOffset within packed vertex
-					pCB->Attribs[i][1] = DrawContext.uiXboxVertexStreamZeroStride;
-					pCB->Attribs[i][2] = NV2AFormatToVtxFmt(attr.format, attr.count);
-					pCB->Attribs[i][3] = 0; // streamBase = 0 (UP staging buffer)
+					if (attr.count == 0) continue; // count 0 = disabled (format 0 is valid: UB_D3D/D3DCOLOR)
+					cb.Attribs[i][0] = packedOffset; // elemOffset within packed vertex
+					cb.Attribs[i][1] = DrawContext.uiXboxVertexStreamZeroStride;
+					cb.Attribs[i][2] = NV2AFormatToVtxFmt(attr.format, attr.count);
+					cb.Attribs[i][3] = 0; // streamBase = 0 (UP staging buffer)
 					packedOffset += attr.count * attr.size;
+					packedOffset = (packedOffset + 3) & ~3u; // pad to DWORD boundary
 				}
 			} else {
-				// VB draw path: slot index = register index, offset = physical address
+				// VB draw path: use cached DMA base + attribute offset
 				for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
 					const VertexAttribute& attr = pg->vertex_attributes[i];
 					if (attr.count == 0) continue;
 
-					pCB->Attribs[i][0] = 0;           // elemOffset (baked into offset)
-					pCB->Attribs[i][1] = attr.stride;
-					pCB->Attribs[i][2] = NV2AFormatToVtxFmt(attr.format, attr.count);
-					pCB->Attribs[i][3] = (UINT)attr.offset; // physical addr = SRV byte offset
+					cb.Attribs[i][0] = 0;           // elemOffset (baked into offset)
+					cb.Attribs[i][1] = attr.stride;
+					cb.Attribs[i][2] = NV2AFormatToVtxFmt(attr.format, attr.count);
+					cb.Attribs[i][3] = NV2AResolveVertexPhysicalAddress(g_NV2A->GetDeviceState(), attr.dma_select, (UINT)attr.offset);
 				}
 			}
 		} else {
-			g_pD3DDeviceContext->Unmap(s_pLayoutCB, 0);
 			return; // No NV2A state — can't draw
 		}
 
-		g_pD3DDeviceContext->Unmap(s_pLayoutCB, 0);
+		// Upload via Map/WRITE_DISCARD (buffer is DYNAMIC)
+		D3D11_MAPPED_SUBRESOURCE mapped = {};
+		HRESULT hr = g_pD3DDeviceContext->Map(s_pLayoutCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+		if (SUCCEEDED(hr)) {
+			memcpy(mapped.pData, &cb, sizeof(cb));
+			g_pD3DDeviceContext->Unmap(s_pLayoutCB, 0);
+		}
 	}
 skip_layout_upload:
 
@@ -648,8 +672,7 @@ skip_layout_upload:
 // * in pg->vertex_attributes[i].inline_buffer. This bypasses the
 // * normal vertex declaration/stream layout entirely — all 16
 // * attributes are packed as FLOAT4 at a fixed 256-byte stride.
-// * After drawing, the inline_buffer arrays are freed (same protocol
-// * as xemu's pgraph_draw_inline_buffer).
+// * After drawing, inline_buffer pointers are reset (pool stays allocated).
 // ******************************************************************
 void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 {
@@ -660,17 +683,31 @@ void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 	if (vertexCount == 0) return;
 
 	// ---------------------------------------------------------------
-	// Step 1: Pack inline buffer data into contiguous UP vertex buffer
+	// Step 1: Build active attribute mask and compute compact stride
 	// ---------------------------------------------------------------
-	// All 16 attributes stored as float4 (16 bytes each) = 256 bytes per vertex
-	const UINT kAttrSize = 4 * sizeof(float);  // 16 bytes
-	const UINT kStride = NV2A_VERTEXSHADER_ATTRIBUTES * kAttrSize; // 256 bytes
+	uint32_t activeMask = 0;
+	int activeCount = 0;
+	for (int a = 0; a < NV2A_VERTEXSHADER_ATTRIBUTES; a++) {
+		if (pg->vertex_attributes[a].inline_buffer) {
+			activeMask |= (1u << a);
+			activeCount++;
+		}
+	}
+	// Fallback: if no attributes have inline_buffer, all use inline_value
+	if (activeCount == 0) activeCount = NV2A_VERTEXSHADER_ATTRIBUTES;
+
+	const UINT kAttrSize = 4 * sizeof(float);  // 16 bytes per attribute
+	// Use compact stride when only some attrs are active; full stride otherwise
+	const UINT kStride = (activeMask ? activeCount : NV2A_VERTEXSHADER_ATTRIBUTES) * kAttrSize;
 	UINT totalSize = vertexCount * kStride;
 
 	EnsureUPVtxDataBuffer(totalSize);
 	if (!s_pUPVtxDataBuf || !s_pUPVtxDataSRV)
 		return;
 
+	// ---------------------------------------------------------------
+	// Step 2: Pack only active attributes into compact UP vertex buffer
+	// ---------------------------------------------------------------
 	{
 		D3D11_MAPPED_SUBRESOURCE mapped = {};
 		HRESULT hr = g_pD3DDeviceContext->Map(s_pUPVtxDataBuf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -678,16 +715,29 @@ void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 
 		float* pDst = (float*)mapped.pData;
 		for (unsigned int v = 0; v < vertexCount; v++) {
-			for (int a = 0; a < NV2A_VERTEXSHADER_ATTRIBUTES; a++) {
-				const VertexAttribute& attr = pg->vertex_attributes[a];
-				const float* pSrc = attr.inline_buffer
-					? &attr.inline_buffer[v * 4]
-					: attr.inline_value;
-				pDst[0] = pSrc[0];
-				pDst[1] = pSrc[1];
-				pDst[2] = pSrc[2];
-				pDst[3] = pSrc[3];
-				pDst += 4;
+			uint32_t mask = activeMask;
+			if (mask) {
+				while (mask) {
+					unsigned long a;
+					_BitScanForward(&a, mask);
+					mask &= mask - 1;
+					const float* pSrc = &pg->vertex_attributes[a].inline_buffer[v * 4];
+					pDst[0] = pSrc[0];
+					pDst[1] = pSrc[1];
+					pDst[2] = pSrc[2];
+					pDst[3] = pSrc[3];
+					pDst += 4;
+				}
+			} else {
+				// No active inline_buffer — pack all inline_value (static per vertex)
+				for (int a = 0; a < NV2A_VERTEXSHADER_ATTRIBUTES; a++) {
+					const float* pSrc = pg->vertex_attributes[a].inline_value;
+					pDst[0] = pSrc[0];
+					pDst[1] = pSrc[1];
+					pDst[2] = pSrc[2];
+					pDst[3] = pSrc[3];
+					pDst += 4;
+				}
 			}
 		}
 
@@ -704,7 +754,7 @@ void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 		return; // Unsupported topology
 
 	// ---------------------------------------------------------------
-	// Step 3: Fill layout CB with float4 layout for all 16 attributes
+	// Step 3: Fill layout CB — active attrs use compact stride, inactive use NONE
 	// ---------------------------------------------------------------
 	{
 		D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -721,11 +771,23 @@ void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 		pCB->NumVerts = vertexCount;
 		pCB->VertexOffset = 0;
 
+		// Quad winding: must match NV2A SETUPRASTER front face setting
+		pCB->WindingCW = CxbxGetClockWiseWindingOrder() ? 1 : 0;
+
+		UINT compactOffset = 0;
 		for (UINT a = 0; a < 16; a++) {
-			pCB->Attribs[a][0] = a * kAttrSize;       // elemOffset
-			pCB->Attribs[a][1] = kStride;             // stride
-			pCB->Attribs[a][2] = CXBX_VTXFMT_FLOAT4;  // format
-			pCB->Attribs[a][3] = 0;                   // streamBase (UP data at offset 0)
+			if (activeMask & (1u << a)) {
+				pCB->Attribs[a][0] = compactOffset;       // elemOffset in compact layout
+				pCB->Attribs[a][1] = kStride;             // compact stride
+				pCB->Attribs[a][2] = CXBX_VTXFMT_FLOAT4;  // format
+				pCB->Attribs[a][3] = 0;                   // streamBase
+				compactOffset += kAttrSize;
+			} else {
+				pCB->Attribs[a][0] = 0;
+				pCB->Attribs[a][1] = 0;
+				pCB->Attribs[a][2] = CXBX_VTXFMT_NONE;   // fetch from defaults CB
+				pCB->Attribs[a][3] = 0;
+			}
 		}
 
 		g_pD3DDeviceContext->Unmap(s_pLayoutCB, 0);
@@ -745,11 +807,10 @@ void CxbxD3D11DrawInlineBuffer(PGRAPHState* pg)
 	BindAndIssueDraw(primType, hostTopology, hostVertexCount, primitiveMode,
 		s_pUPVtxDataSRV, nullptr, s_pUPVtxDataSRV_SNORM16x2, s_pUPVtxDataSRV_UNORM8x4);
 
-	// Free per-attribute inline buffers (same protocol as xemu)
+	// Reset per-attribute inline buffers (pool stays allocated for reuse)
 	for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
 		VertexAttribute& attr = pg->vertex_attributes[i];
 		if (attr.inline_buffer) {
-			free(attr.inline_buffer);
 			attr.inline_buffer = nullptr;
 		}
 	}

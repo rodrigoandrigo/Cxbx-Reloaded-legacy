@@ -26,13 +26,13 @@
 
 #include "JvsIo.h"
 #include <cstdio>
+#include <SDL3/SDL_keyboard.h>
 #include <string>
 
 JvsIo* g_pJvsIo;
 
 //#define DEBUG_JVS_PACKETS
 #include <vector>
-#include <Windows.h>
 // We will emulate SEGA 837-13551 IO Board
 JvsIo::JvsIo(uint8_t* sense)
 {
@@ -48,9 +48,11 @@ JvsIo::JvsIo(uint8_t* sense)
 
 void JvsIo::Update()
 {
+	const bool* keyboardState = SDL_GetKeyboardState(nullptr);
+
 	// Handle coin input
 	static bool previousCoinButtonsState = false;
-	bool currentCoinButtonState = GetAsyncKeyState('5');
+	bool currentCoinButtonState = keyboardState[SDL_SCANCODE_5];
 	if (currentCoinButtonState && !previousCoinButtonsState) {
 		Inputs.coins[0].coins += 1;
 	}
@@ -58,12 +60,12 @@ void JvsIo::Update()
 
 	// TODO: Update Jvs inputs based on user configuration
 	// For now, hardcode the inputs for the game we are currently testing (Ollie King)
-	Inputs.switches.player[0].start = GetAsyncKeyState('1');                                                        // Start
-	Inputs.analog[1].value = GetAsyncKeyState(VK_LEFT) ? 0x9000 : (GetAsyncKeyState(VK_RIGHT) ? 0x7000 : 0x8000);   // Board Swing
-	Inputs.switches.player[0].up = GetAsyncKeyState(VK_UP);                                                         // Board Front
-	Inputs.switches.player[0].down = GetAsyncKeyState(VK_DOWN);                                                     // Board Rear
-	Inputs.switches.player[0].button[0] = GetAsyncKeyState('A');                                                    // Left Button
-	Inputs.switches.player[0].button[1] = GetAsyncKeyState('S');                                                    // Right Button
+	Inputs.switches.player[0].start = keyboardState[SDL_SCANCODE_1];                                                // Start
+	Inputs.analog[1].value = keyboardState[SDL_SCANCODE_LEFT] ? 0x9000 : (keyboardState[SDL_SCANCODE_RIGHT] ? 0x7000 : 0x8000); // Board Swing
+	Inputs.switches.player[0].up = keyboardState[SDL_SCANCODE_UP];                                                  // Board Front
+	Inputs.switches.player[0].down = keyboardState[SDL_SCANCODE_DOWN];                                              // Board Rear
+	Inputs.switches.player[0].button[0] = keyboardState[SDL_SCANCODE_A];                                            // Left Button
+	Inputs.switches.player[0].button[1] = keyboardState[SDL_SCANCODE_S];                                            // Right Button
 }
 
 uint8_t JvsIo::GetDeviceId()

@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -30,6 +30,7 @@
 #include "core\kernel\support\EmuFS.h"
 #include "EmuKrnlKi.h"
 #include <future>
+#include <cstdio>
 
 // CONTAINING_RECORD macro
 // Gets the value of structure member (field - num1),given the type(MYSTRUCT, in this code) and the List_Entry head(temp, in this code)
@@ -52,6 +53,7 @@ xbox::PLIST_ENTRY RemoveTailList(xbox::PLIST_ENTRY pListHead);
 
 extern xbox::LAUNCH_DATA_PAGE DefaultLaunchDataPage;
 extern xbox::PKINTERRUPT EmuInterruptList[MAX_BUS_INTERRUPT_LEVEL + 1];
+extern xbox::PKINTERRUPT EmuInterruptChained[MAX_BUS_INTERRUPT_LEVEL + 1];
 // Indicates to disable/enable all interrupts when cli and sti instructions are executed
 inline std::atomic_bool g_bEnableAllInterrupts = true;
 
@@ -146,13 +148,26 @@ xbox::ntstatus_xt WaitApc(T &&Lambda, xbox::PLARGE_INTEGER Timeout, xbox::boolea
 	xbox::ntstatus_xt status;
 	if (Timeout == nullptr) {
 		// No timout specified, so this is an infinite wait until an alert, a user apc or the object(s) become(s) signalled
+		HANDLE hWake = CxbxGetThreadWakeEvent(kThread);
 		while (true) {
 			if (const auto ret = SatisfyWait(Lambda, kThread, Alertable, WaitMode)) {
 				status = *ret;
 				break;
 			}
 
-			std::this_thread::yield();
+			// Block on the per-thread wake event instead of polling.
+			// The event is signaled by KiUnwaitThread (when the waited
+			// object becomes signaled or a timeout fires) and by
+			// KiInsertQueueApc (when an APC is queued to this thread).
+			// Use alertable wait so host I/O completion APCs still work.
+			// Use a timeout instead of INFINITE to handle the case where
+			// game code directly writes to Header.SignalState (bypassing
+			// KeSetEvent), which would not trigger KiWaitTest/KiUnwaitThread.
+			if (hWake) {
+				WaitForSingleObjectEx(hWake, 10, TRUE);
+			} else {
+				SleepEx(1, TRUE);
+			}
 		}
 	}
 	else if (Timeout->QuadPart == 0) {
@@ -169,7 +184,10 @@ xbox::ntstatus_xt WaitApc(T &&Lambda, xbox::PLARGE_INTEGER Timeout, xbox::boolea
 		}
 	}
 	else {
-		// A non-zero timeout means we have to check the conditions until we reach the requested time
+		// A non-zero timeout means we have to check the conditions until we reach the requested time.
+		// The kernel timer (set up by the caller) will fire KiTimerExpiration → KiUnwaitThread
+		// which signals our wake event, so we can block efficiently here.
+		HANDLE hWake = CxbxGetThreadWakeEvent(kThread);
 		while (true) {
 			if (const auto ret = SatisfyWait(Lambda, kThread, Alertable, WaitMode)) {
 				status = *ret;
@@ -181,7 +199,11 @@ xbox::ntstatus_xt WaitApc(T &&Lambda, xbox::PLARGE_INTEGER Timeout, xbox::boolea
 				break;
 			}
 
-			std::this_thread::yield();
+			if (hWake) {
+				WaitForSingleObjectEx(hWake, 10, TRUE);
+			} else {
+				SleepEx(1, TRUE);
+			}
 		}
 	}
 

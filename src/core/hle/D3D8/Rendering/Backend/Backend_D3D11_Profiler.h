@@ -14,6 +14,10 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include "common/Timer.h"
+#ifdef CXBXR_UWP
+#include "common/CxbxEmbedRuntime.h"
+#endif
 
 // ============================================================
 // Phase IDs — add new phases here and in the name table below.
@@ -179,13 +183,12 @@ inline void CxbxProfilerFrameTick()
 {
     if (!g_bCxbxProfilerEnabled) return;
 
-    LARGE_INTEGER now, freq;
+    LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
 
     // Record frame interval
     if (g_ProfileLastFrameQPC.QuadPart != 0) {
-        double frameMs = (double)(now.QuadPart - g_ProfileLastFrameQPC.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double frameMs = (double)(now.QuadPart - g_ProfileLastFrameQPC.QuadPart) * 1000.0 / (double)HostQPCFrequency;
         g_ProfileFrameIntervalStats.record(frameMs);
     }
     g_ProfileLastFrameQPC = now;
@@ -193,7 +196,7 @@ inline void CxbxProfilerFrameTick()
     // Record per-phase stats for this frame (render-thread phases only)
     for (int i = 0; i < PROF_CROSS_THREAD_START; i++) {
         if (g_ProfileFramePhaseAccum[i] > 0) {
-            double ms = (double)g_ProfileFramePhaseAccum[i] * 1000.0 / (double)freq.QuadPart;
+            double ms = (double)g_ProfileFramePhaseAccum[i] * 1000.0 / (double)HostQPCFrequency;
             g_ProfilePhaseFrameStats[i].record(ms);
         }
         g_ProfileFramePhaseAccum[i] = 0;
@@ -209,7 +212,7 @@ inline void CxbxProfilerFrameTick()
         return;
     }
 
-    double elapsed = (double)(now.QuadPart - g_ProfileLastReport.QuadPart) / (double)freq.QuadPart;
+    double elapsed = (double)(now.QuadPart - g_ProfileLastReport.QuadPart) / (double)HostQPCFrequency;
     if (elapsed < 1.0) return;
 
     // ---- Dump aggregate breakdown ----
@@ -240,7 +243,7 @@ inline void CxbxProfilerFrameTick()
             ? InterlockedExchange64(&g_ProfileAccum[i], 0)
             : g_ProfileAccum[i];
         if (ticks > 0) {
-            double totalMs = (double)ticks * 1000.0 / (double)freq.QuadPart;
+            double totalMs = (double)ticks * 1000.0 / (double)HostQPCFrequency;
             auto& s = g_ProfilePhaseFrameStats[i];
             if (s.count > 0) {
                 pos += sprintf_s(buf + pos, sizeof(buf) - pos,
@@ -260,6 +263,12 @@ inline void CxbxProfilerFrameTick()
     fflush(stdout);
     OutputDebugStringA(buf);
 
+    // A packaged app cannot write beside its executable. Forward profiler
+    // output through the embedding callback; the UWP host decides whether to
+    // persist it in ApplicationData::LocalFolder.
+#ifdef CXBXR_UWP
+    CxbxEmbedRuntimeReportLog(CXBXR_MODULE::D3D8, LOG_LEVEL::INFO, buf);
+#else
     // Write to a log file next to the executable (survives stdout redirection)
     {
         static HANDLE s_hLog = INVALID_HANDLE_VALUE;
@@ -279,6 +288,7 @@ inline void CxbxProfilerFrameTick()
             FlushFileBuffers(s_hLog);
         }
     }
+#endif
 
     // Reset render-thread accumulators (cross-thread ones reset via InterlockedExchange above)
     for (int i = 0; i < PROF_CROSS_THREAD_START; i++)

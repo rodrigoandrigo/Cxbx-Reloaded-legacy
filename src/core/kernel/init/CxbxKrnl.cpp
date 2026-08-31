@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -33,6 +33,7 @@
 #include "common\xbdm\CxbxXbdm.h" // For Cxbx_LibXbdmThunkTable
 #include "core/kernel/support/PatchRdtsc.hpp"
 #include "devices\x86\EmuX86.h" // For EmuX86_Init
+#include "devices/x86/CxbxCpuBackend.h"
 #include "core\kernel\support\EmuFile.h"
 #include "core\kernel\support\EmuFS.h" // EmuInitFS
 #include "EmuEEPROM.h" // For CxbxRestoreEEPROM, EEPROM
@@ -48,6 +49,8 @@
 #include "core\kernel\memory-manager\VMManager.h"
 #include "CxbxDebugger.h"
 #include "common/util/cliConfig.hpp"
+#include "common/CxbxEmbedRuntime.h"
+#include "common/cxbxr.hpp"
 #include "common/ReserveAddressRanges.h"
 #include "common/xbox/Types.hpp"
 #include "common/win32/WineEnv.h"
@@ -322,15 +325,50 @@ void InitSoftwareInterrupts()
 }
 #endif
 
-void MapThunkTable(uint32_t* kt, uint32_t* pThunkTable)
+void MapThunkTable(uint32_t* kt, const uintptr_t* pThunkTable)
 {
     const bool SendDebugReports = (pThunkTable == CxbxKrnl_KernelThunkTable) && CxbxDebugger::CanReport();
+	const bool IsKernelThunkTable = (pThunkTable == CxbxKrnl_KernelThunkTable);
+	const uint8_t systemFlag = CxbxKrnl_GetCurrentSystemFlag();
 
 	uint32_t* kt_tbl = (uint32_t*)kt;
 	int i = 0;
 	while (kt_tbl[i] != 0) {
-		int t = kt_tbl[i] & 0x7FFFFFFF;
-		kt_tbl[i] = pThunkTable[t];
+		const uint32_t t = kt_tbl[i] & 0x7FFFFFFF;
+		const uint32_t thunkCount = IsKernelThunkTable ?
+			QEMU_CXBX_KERNEL_ORDINAL_COUNT : 73u;
+		if (t >= thunkCount) {
+			EmuLogInit(LOG_LEVEL::WARNING, "Import ordinal %u is out of range", t);
+			kt_tbl[i++] = 0;
+			continue;
+		}
+
+		// Check if this ordinal is available for the current system type
+		if (IsKernelThunkTable && !(CxbxKrnl_KernelThunkAvailability(t) & systemFlag)) {
+			EmuLogInit(LOG_LEVEL::WARNING, "Kernel import %d is not available on %s (devkit-only API)",
+				t, g_bIsChihiro ? "Chihiro" : "Retail");
+			kt_tbl[i] = static_cast<uint32_t>(pThunkTable[0]); // Map to zeroptr (undefined)
+		}
+		else {
+#if defined(CXBXR_UWP)
+			if (IsKernelThunkTable && CxbxKrnl_KernelThunkIsData(t)) {
+				// Preserve the offset inside the native page. Each vCPU maps the
+				// corresponding host page at this ordinal-specific guest page.
+				kt_tbl[i] = QEMU_CXBX_KERNEL_DATA_BASE +
+					(t * QEMU_CXBX_KERNEL_DATA_STRIDE) +
+					(static_cast<uint32_t>(pThunkTable[t]) &
+					 (QEMU_CXBX_KERNEL_DATA_STRIDE - 1));
+			}
+			else {
+				const uint32_t base = IsKernelThunkTable ?
+					QEMU_CXBX_KERNEL_GATEWAY_BASE : QEMU_CXBX_XBDM_GATEWAY_BASE;
+				kt_tbl[i] = base + (t * QEMU_CXBX_GATEWAY_STRIDE);
+			}
+#else
+			kt_tbl[i] = static_cast<uint32_t>(pThunkTable[t]);
+#endif
+		}
+
         if (SendDebugReports) {
             // TODO: Update CxbxKrnl_KernelThunkTable to include symbol names
             std::string importName = "KernelImport_" + std::to_string(t);
@@ -366,6 +404,16 @@ void ImportLibraries(XbeImportEntry *pImportDirectory)
 
 FILE* CxbxrKrnlSetupVerboseLog(int BootFlags)
 {
+#if defined(CXBXR_UWP)
+	(void)BootFlags;
+	return nullptr;
+#else
+	// An embedded UWP core must not attach, detach or redirect the host's
+	// console. EmuLogOutput routes the same records to the registered callback.
+	if (CxbxEmbedRuntimeIsActive()) {
+		return nullptr;
+	}
+
 	std::string tempStr;
 	// Get KernelDebugMode :
 	CxbxrKrnl_DebugMode = DebugMode::DM_NONE;
@@ -415,6 +463,7 @@ FILE* CxbxrKrnlSetupVerboseLog(int BootFlags)
 		}
 	}
 	return nullptr;
+#endif
 }
 
 static void CxbxrKrnlSyncGUI()
@@ -824,10 +873,8 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	char GitVersionEmuShared[GitVersionMaxLength];
 	g_EmuShared->GetGitVersion(GitVersionEmuShared);
 	if (std::strncmp(GitVersionEmuShared, GetGitVersionStr(), GetGitVersionLength()) != 0) {
-		PopupError(nullptr, "Mismatch detected between EmuShared and cxbx.exe/cxbxr-emu.dll, aborting."
+		PopupError(nullptr, "Mismatch detected between EmuShared and cxbx.exe/cxbxr-emu.dll, continue at your own risk!"
 			"\n\nPlease extract all contents from zip file and do not mix with older/newer builds.");
-		CxbxrShutDown();
-		return;
 	}
 
 	std::string tempStr;
@@ -868,7 +915,11 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	if (cli_config::GetValue(cli_config::hwnd, &tempStr)) {
 		hWnd = (HWND)std::atoi(tempStr.c_str());
 	}
+#if defined(CXBXR_UWP)
+	CxbxKrnl_hEmuParent = nullptr;
+#else
 	CxbxKrnl_hEmuParent = IsWindow(hWnd) ? hWnd : nullptr;
+#endif
 
 	int BootFlags;
 	g_EmuShared->GetBootFlags(&BootFlags);
@@ -1060,14 +1111,16 @@ static void CxbxrKrnlInitHacks()
 	int BootFlags,
 	HardwareModel hardwareModel)
 {
+#if !defined(CXBXR_UWP)
 	unsigned Host2XbStackBaseReserved = 0;
 	__asm mov Host2XbStackBaseReserved, esp;
 	unsigned Host2XbStackSizeReserved = EmuGenerateStackSize(Host2XbStackBaseReserved, 0);
 	__asm sub esp, Host2XbStackSizeReserved;
-	// timeBeginPeriod is not in the UWP API contract. The UWP host drives
-	// presentation from its SwapChainPanel render loop.
-#ifndef CXBXR_UWP
-	timeBeginPeriod(1);
+#endif
+    // The multimedia timer-period APIs are desktop imports. UWP uses its
+    // waitable-timer path without changing the system-wide timer resolution.
+#if !defined(CXBXR_UWP)
+    timeBeginPeriod(1);
 #endif
 
     xbox::InitializeFscCacheEvent();
@@ -1156,9 +1209,13 @@ static void CxbxrKrnlInitHacks()
 
 	// Create a kpcr for this thread. This is necessary because ObInitSystem needs to access the irql. This must also be done before
 	// CxbxInitWindow because that function creates the xbox EmuUpdateTickCount thread
+#if defined(CXBXR_UWP)
+	EmuGenerateFS<true>(xbox::zeroptr);
+#else
 	EmuGenerateFS<true>(xbox::zeroptr, Host2XbStackBaseReserved, Host2XbStackSizeReserved);
+#endif
 	if (!xbox::ObInitSystem()) {
-		CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to intialize ObInitSystem.");
+		CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to initialize ObInitSystem.");
 	}
 	xbox::PsInitSystem();
 	xbox::KiInitSystem();
@@ -1203,6 +1260,18 @@ static void CxbxrKrnlInitHacks()
 	}
 
 	InitXboxHardware(hardwareModel);
+
+	// Allocate HalDiskModelNumber/SerialNumber buffers from Xbox pool memory
+	// so that MmIsAddressValid returns TRUE for the Buffer pointers.
+	{
+		PCHAR pModelBuf = (PCHAR)xbox::ExAllocatePoolWithTag(xbox::HalDiskModelNumber.MaximumLength, 'dlaH');
+		memcpy(pModelBuf, xbox::HalDiskModelNumber.Buffer, xbox::HalDiskModelNumber.MaximumLength);
+		xbox::HalDiskModelNumber.Buffer = pModelBuf;
+
+		PCHAR pSerialBuf = (PCHAR)xbox::ExAllocatePoolWithTag(xbox::HalDiskSerialNumber.MaximumLength, 'dlaH');
+		memcpy(pSerialBuf, xbox::HalDiskSerialNumber.Buffer, xbox::HalDiskSerialNumber.MaximumLength);
+		xbox::HalDiskSerialNumber.Buffer = pSerialBuf;
+	}
 
 	// Read Xbox video mode from the SMC, store it in HalBootSMCVideoMode
 	xbox::HalReadSMBusValue(SMBUS_ADDRESS_SYSTEM_MICRO_CONTROLLER, SMC_COMMAND_AV_PACK, FALSE, (xbox::PULONG)&xbox::HalBootSMCVideoMode);
@@ -1349,36 +1418,139 @@ static void CxbxrKrnlInitHacks()
 	// Launch the xbe
 	xbox::PsCreateSystemThread(&hThread, xbox::zeroptr, CxbxLaunchXbe, Entry, FALSE);
 
+	// NOTE: The DPC/ISR dispatch loop conceptually runs on the Xbox's single
+	// CPU alongside game threads. Pinning it to the Xbox core matches real HW
+	// but may cause contention with system_events (also Xbox core, ABOVE_NORMAL
+	// priority). Left on "Other" cores for now pending further investigation.
+	// g_AffinityPolicy->SetAffinityXbox();
+
 	xbox::KeRaiseIrqlToDpcLevel();
 	extern NV2ADevice* g_NV2A;
 
-	while (true) {
+	while (!CxbxEmbedRuntimeStopRequested()) {
 		xbox::KeWaitForDpc();
-
-		// Dispatch GPU hardware interrupt (IRQ 3) on this thread BEFORE running DPCs.
-		// This ensures ISR and DPC execute sequentially (never concurrently), matching
-		// real Xbox behavior where both run on the same CPU at non-preemptible IRQLs.
-		if (g_bEnableAllInterrupts && g_NV2A) {
-			NV2AState* d = g_NV2A->GetDeviceState();
-			bool vblank_occurred = d->vblank_pending.test();
-			if (vblank_occurred) {
-				d->vblank_pending.clear();
-
-				if (EmuInterruptList[3] && EmuInterruptList[3]->Connected) {
-					// Fire the miniport ISR. Set pcrtc pending so the ISR sees
-					// a valid interrupt source when it reads PMC_INTR_0.
-					d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
-					HalSystemInterrupts[3].Trigger(EmuInterruptList[3]);
-				}
-			} else if (HalSystemInterrupts[3].IsPending() &&
-			           EmuInterruptList[3] && EmuInterruptList[3]->Connected) {
-				// Non-VBlank GPU interrupt (e.g. PGRAPH INTR_ERROR from
-				// D3DDevice_InsertCallback). Fire the ISR so it can ack.
-				HalSystemInterrupts[3].Trigger(EmuInterruptList[3]);
-			}
+		if (CxbxEmbedRuntimeStopRequested()) {
+			break;
 		}
 
-		ExecuteDpcQueue();
+		// Clear the pending flag immediately after waking. Any new signal
+		// (KeSignalVBlankPending / KeInsertQueueDpc) that arrives while we
+		// process the current batch will re-set the flag, ensuring we loop
+		// back without blocking. Clearing here (instead of at the end of
+		// ExecuteDpcQueue) prevents lost-wake races.
+		extern void KeClearDpcPending();
+		KeClearDpcPending();
+
+		// Dispatch GPU hardware interrupt (IRQ 3) on this thread BEFORE running DPCs.
+		// Check NV2A hardware state DIRECTLY instead of HalSystemInterrupt::IsPending()
+		// to avoid races from non-atomic boolean members accessed by multiple threads.
+		// Use a do-while to re-check after processing: if new interrupts arrived during
+		// ISR/DPC execution, handle them immediately instead of risking a lost wakeup.
+		bool more_work;
+		do {
+			more_work = false;
+
+			if (g_bEnableAllInterrupts && g_NV2A) {
+				NV2AState* d = g_NV2A->GetDeviceState();
+
+				// Safety net: ensure VBlank stays enabled once the game's ISR is connected.
+				// The D3D runtime may briefly write 0 to NV_PCRTC_INTR_EN during init;
+				// re-assert to avoid missing VBlanks during that window.
+				if (EmuInterruptList[3] && EmuInterruptList[3]->Connected &&
+				    !(d->pcrtc.enabled_interrupts & NV_PCRTC_INTR_0_VBLANK)) {
+					d->pcrtc.enabled_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+				}
+
+				// Latch VBlank into pcrtc.pending_interrupts (like real hardware would)
+				if (d->vblank_pending.test()) {
+					d->vblank_pending.clear();
+					d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+
+					// Generate PVIDEO buffer completion interrupts for active overlay buffers.
+					// On real hardware, when the overlay is active, at each VBlank the PVIDEO
+					// engine fires an interrupt for the buffer that was just scanned out, allowing
+					// the game to know the buffer is free to rewrite with the next decoded frame.
+					if (d->enable_overlay) {
+						uint32_t pvideo_buffer = d->pvideo.regs[NV_PVIDEO_BUFFER / 4];
+						if (pvideo_buffer & NV_PVIDEO_BUFFER_0_USE)
+							d->pvideo.pending_interrupts |= NV_PVIDEO_INTR_BUFFER_0;
+						if (pvideo_buffer & NV_PVIDEO_BUFFER_1_USE)
+							d->pvideo.pending_interrupts |= NV_PVIDEO_INTR_BUFFER_1;
+
+						// Wake the puller thread so it can composite and present the
+						// overlay.  During FMV, no pushbuffer activity occurs, so the
+						// puller stays asleep and the overlay is never displayed.
+						SetEvent(d->pfifo.puller_event);
+					}
+				}
+
+				// Check if any NV2A sub-unit has a pending interrupt that should
+				// fire the ISR. This mirrors the PMC_INTR_0 live computation.
+				// Only fire when pmc.enabled_interrupts != 0 (the game's ISR
+				// checks NV_PMC_INTR_EN_0 and returns early if master enable is off).
+				bool pvideo_pending = (d->pvideo.pending_interrupts & d->pvideo.enabled_interrupts) != 0;
+				bool nv2a_irq_pending = d->pmc.enabled_interrupts &&
+					((d->pgraph.pending_interrupts & d->pgraph.enabled_interrupts) ||
+					 (d->pfifo.pending_interrupts & d->pfifo.enabled_interrupts) ||
+					 (d->pcrtc.pending_interrupts & d->pcrtc.enabled_interrupts) ||
+					 (d->ptimer.pending_interrupts & d->ptimer.enabled_interrupts) ||
+					 pvideo_pending);
+
+				// PGRAPH INTR_ERROR (D3DDevice_InsertCallback) stalls the GPU
+				// pipeline until the CPU acknowledges it. When pmc_en=0, the
+				// ISR cannot fire, so we ack directly to unblock the puller.
+				// When pmc_en=1, the game's ISR handles it naturally (reads
+				// TRAPPED_DATA_LOW, dispatches the callback, writes PGRAPH_INTR
+				// to ack via MMIO).
+				if (!d->pmc.enabled_interrupts &&
+				    (d->pgraph.pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
+					d->pgraph.pending_interrupts &= ~NV_PGRAPH_INTR_ERROR;
+					qemu_cond_broadcast(&d->pgraph.interrupt_cond);
+				}
+
+				if (nv2a_irq_pending &&
+				    EmuInterruptList[3] && EmuInterruptList[3]->Connected) {
+					HalSystemInterrupts[3].Trigger(EmuInterruptList[3]);
+				}
+			}
+
+			// Dispatch all pending DPCs. This thread is the primary DPC
+			// dispatcher — timer expirations (KiTimerExpiration) and other
+			// system DPCs rely on it. The combined g_DpcRoutineActive /
+			// per-thread PRCB guard inside ExecuteDpcQueue prevents dispatch
+			// when game code has set DpcRoutineActive (via fs:0x58 writes)
+			// or when we're already dispatching on this thread.
+			ExecuteDpcQueue();
+
+			// Re-check: if NV2A interrupts are still pending after ISR+DPC processing,
+			// loop back immediately. This catches cases where:
+			// - A new NV097_NO_OPERATION fired while the DPC was running
+			// - The DPC re-enabled PMC and update_irq found more pending work
+			// - A VBlank arrived during processing
+			if (g_bEnableAllInterrupts && g_NV2A) {
+				NV2AState* d = g_NV2A->GetDeviceState();
+				if (d->vblank_pending.test() ||
+				    (d->pmc.enabled_interrupts &&
+				     ((d->pgraph.pending_interrupts & d->pgraph.enabled_interrupts) ||
+				      (d->pfifo.pending_interrupts & d->pfifo.enabled_interrupts) ||
+				      (d->pcrtc.pending_interrupts & d->pcrtc.enabled_interrupts) ||
+				      (d->ptimer.pending_interrupts & d->ptimer.enabled_interrupts))) ||
+				    (d->pgraph.pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
+					more_work = true;
+				}
+			}
+		} while (more_work);
+
+		// Check for present stalls — if no present has arrived in 5 seconds,
+		// dump all thread stacks to diagnose what's blocking progress.
+		EmuCheckPresentStall(5000);
+	}
+
+	// The embedding worker returns control to its host after a stop request;
+	// the legacy standalone route continues to own and terminate its process.
+	if (CxbxEmbedRuntimeIsActive()) {
+		CxbxrShutDown();
+		return;
 	}
 }
 
@@ -1400,7 +1572,7 @@ void CxbxrKrnlSuspendThreads()
 	threads.reserve(KiUniqueProcess.StackCount);
 
 	// Don't use EmuKeGetPcr because that asserts kpcr
-	xbox::KPCR* Pcr = reinterpret_cast<xbox::PKPCR>(__readfsdword(TIB_ArbitraryDataSlot));
+	xbox::KPCR* Pcr = const_cast<xbox::KPCR*>(EmuKeGetPcr());
 
 	// If there's nothing in list entry, skip this step.
 	if (!ThreadListEntry) {
@@ -1479,8 +1651,10 @@ void CxbxKrnlPrintUEM(ULONG ErrorCode)
 	g_CxbxPrintUEM = true; // print the UEM
 
 	// Force repaint screen in order for UEM to be visible every time.
+#if !defined(CXBXR_UWP)
 	InvalidateRect(g_hEmuWindow, nullptr, TRUE);
 	UpdateWindow(g_hEmuWindow);
+#endif
 
 	CxbxPrintUEMInfo(ErrorCode);
 

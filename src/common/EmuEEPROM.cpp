@@ -30,8 +30,14 @@
 #include <core\kernel\exports\xboxkrnl.h> // For XC_VALUE_INDEX and XBOX_EEPROM
 #include "cxbxr.hpp" // For CxbxrAbort
 #include <stdio.h> // For printf
+#if defined(CXBXR_UWP)
+#include <fileapifromapp.h>
+#include <memoryapi.h>
+#else
 #include <shlobj.h> // For HANDLE, CreateFile, CreateFileMapping, MapViewOfFile
+#endif
 #include <random>
+#include <string>
 
 #include "EmuEEPROM.h" // For EEPROMInfo, EEPROMInfos
 #include "core\kernel\support\Emu.h" // For EmuWarning
@@ -90,11 +96,57 @@ void gen_section_CRCs(xbox::XBOX_EEPROM* eeprom) {
 }
 
 #ifdef CXBXR_EMU
+#if defined(CXBXR_UWP)
+static std::wstring EepromPathFromUtf8(const char* path)
+{
+	if (path == nullptr) {
+		return {};
+	}
+
+	int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
+	if (length == 0) {
+		length = MultiByteToWideChar(CP_ACP, 0, path, -1, nullptr, 0);
+	}
+	if (length == 0) {
+		return {};
+	}
+
+	std::wstring result(static_cast<size_t>(length), L'\0');
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, result.data(), length) == 0 &&
+		MultiByteToWideChar(CP_ACP, 0, path, -1, result.data(), length) == 0) {
+		return {};
+	}
+	result.resize(static_cast<size_t>(length - 1));
+	return result;
+}
+
+static ::HANDLE OpenEepromFileFromApp(const wchar_t* path, DWORD creationDisposition)
+{
+	CREATEFILE2_EXTENDED_PARAMETERS parameters{};
+	parameters.dwSize = sizeof(parameters);
+	parameters.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+	return CreateFile2FromAppW(
+		path,
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		creationDisposition,
+		&parameters);
+}
+#endif
+
 xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 {
 	xbox::XBOX_EEPROM *pEEPROM;
 
 	// First, try to open an existing EEPROM.bin file :
+#if defined(CXBXR_UWP)
+	const std::wstring eepromPath = EepromPathFromUtf8(szFilePath_EEPROM_bin);
+	if (eepromPath.empty()) {
+		EmuLogEx(LOG_PREFIX_INIT, LOG_LEVEL::DEBUG, "Invalid EEPROM.bin path!\n");
+		return nullptr;
+	}
+	::HANDLE hFileEEPROM = OpenEepromFileFromApp(eepromPath.c_str(), OPEN_EXISTING);
+#else
 	HANDLE hFileEEPROM = CreateFile(szFilePath_EEPROM_bin,
 		GENERIC_READ | GENERIC_WRITE,
 		FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -102,11 +154,15 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 		OPEN_EXISTING,
 		FILE_ATTRIBUTE_NORMAL, // FILE_FLAG_WRITE_THROUGH
 		/* hTemplateFile */nullptr);
+#endif
 
 	bool NeedsInitialization = (hFileEEPROM == INVALID_HANDLE_VALUE);
 	if (NeedsInitialization)
 	{
 		// If the EEPROM.bin file doesn't exist yet, create it :
+#if defined(CXBXR_UWP)
+		hFileEEPROM = OpenEepromFileFromApp(eepromPath.c_str(), OPEN_ALWAYS);
+#else
 		hFileEEPROM = CreateFile(szFilePath_EEPROM_bin,
 			GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -114,6 +170,7 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 			OPEN_ALWAYS,
 			FILE_ATTRIBUTE_NORMAL, // FILE_FLAG_WRITE_THROUGH
 			/* hTemplateFile */nullptr);
+#endif
 		if (hFileEEPROM == INVALID_HANDLE_VALUE)
 		{
 			EmuLogEx(LOG_PREFIX_INIT, LOG_LEVEL::DEBUG, "Couldn't create EEPROM.bin file!\n");
@@ -122,9 +179,19 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 	}
 
 	// Make sure EEPROM.bin is at least 256 bytes in size
-	SetFilePointer(hFileEEPROM, EEPROM_SIZE, nullptr, FILE_BEGIN);
+	LARGE_INTEGER eepromEnd{};
+	eepromEnd.QuadPart = EEPROM_SIZE;
+	SetFilePointerEx(hFileEEPROM, eepromEnd, nullptr, FILE_BEGIN);
 	SetEndOfFile(hFileEEPROM);
 
+#if defined(CXBXR_UWP)
+	::HANDLE hFileMappingEEPROM = CreateFileMappingFromApp(
+		hFileEEPROM,
+		/* SecurityAttributes */nullptr,
+		PAGE_READWRITE,
+		EEPROM_SIZE,
+		/* Name */nullptr);
+#else
 	HANDLE hFileMappingEEPROM = CreateFileMapping(
 		hFileEEPROM,
 		/* lpFileMappingAttributes */nullptr,
@@ -132,6 +199,7 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 		/* dwMaximumSizeHigh */0,
 		/* dwMaximumSizeLow */EEPROM_SIZE,
 		/**/nullptr);
+#endif
 	if (hFileMappingEEPROM == NULL)
 	{
 		EmuLogEx(LOG_PREFIX_INIT, LOG_LEVEL::DEBUG, "Couldn't create EEPROM.bin file mapping!\n");
@@ -142,20 +210,33 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 	GetFileSizeEx(hFileEEPROM, &len_li);
 	unsigned int FileSize = len_li.u.LowPart;
 	if (FileSize != 256) {
-		CxbxrAbort("%s : EEPROM.bin file is not 256 bytes large!\n", __func__);
+		EmuLogEx(LOG_PREFIX_INIT, LOG_LEVEL::DEBUG, "EEPROM.bin file is not 256 bytes large!\n");
+		CloseHandle(hFileMappingEEPROM);
+		CloseHandle(hFileEEPROM);
+		return nullptr;
 	}
 
 	// Map EEPROM.bin contents into memory :
+#if defined(CXBXR_UWP)
+	pEEPROM = static_cast<xbox::XBOX_EEPROM *>(MapViewOfFileFromApp(
+		hFileMappingEEPROM,
+		FILE_MAP_READ | FILE_MAP_WRITE,
+		0,
+		EEPROM_SIZE));
+#else
 	pEEPROM = (xbox::XBOX_EEPROM *)MapViewOfFile(
 		hFileMappingEEPROM,
 		FILE_MAP_READ | FILE_MAP_WRITE,
 		/* dwFileOffsetHigh */0,
 		/* dwFileOffsetLow */0,
 		EEPROM_SIZE);
+#endif
 	if (pEEPROM == nullptr) {
 		EmuLogEx(LOG_PREFIX_INIT, LOG_LEVEL::DEBUG, "Couldn't map EEPROM.bin into memory!\n");
 		return nullptr;
 	}
+	CloseHandle(hFileMappingEEPROM);
+	CloseHandle(hFileEEPROM);
 
     // Recalculates the checksum field for User and Factory settings each time
     // so that users do not need to delete their EEPROM.bin from older versions

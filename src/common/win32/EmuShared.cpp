@@ -29,8 +29,6 @@
 
 #include "core\kernel\support\Emu.h"
 #include "EmuShared.h"
-#include <cstdlib>
-#include <new>
 
 #include <windows.h>
 #include <cstdio>
@@ -52,20 +50,6 @@ HMODULE hActiveModule = NULL;
 // ******************************************************************
 bool EmuShared::Init(long long sessionID)
 {
-#if defined(CXBXR_UWP)
-	(void)sessionID;
-	if (g_EmuShared) {
-		++g_EmuShared->m_RefCount;
-		return true;
-	}
-	// The desktop implementation relies on a zero-filled file mapping. Keep
-	// that constructor contract while making the object process-local for UWP.
-	void* storage = std::calloc(1, sizeof(EmuShared));
-	if (!storage) return false;
-	g_EmuShared = new (storage) EmuShared();
-	g_EmuShared->m_RefCount = 1;
-	return true;
-#else
     // ******************************************************************
     // * Ensure initialization only occurs once
     // ******************************************************************
@@ -90,7 +74,18 @@ bool EmuShared::Init(long long sessionID)
     // ******************************************************************
     {
         std::string emuSharedStr = "Local\\EmuShared-s" + std::to_string(sessionID);
-        hMapObject = CreateFileMapping
+#if defined(CXBXR_UWP)
+        std::wstring emuSharedName(emuSharedStr.begin(), emuSharedStr.end());
+        hMapObject = CreateFileMappingFromApp
+        (
+            INVALID_HANDLE_VALUE,
+            nullptr,
+            PAGE_READWRITE,
+            sizeof(EmuShared),
+            emuSharedName.c_str()
+        );
+#else
+        hMapObject = CreateFileMappingA
         (
             INVALID_HANDLE_VALUE,   // Paging file
             nullptr,                // default security attributes
@@ -99,6 +94,7 @@ bool EmuShared::Init(long long sessionID)
             sizeof(EmuShared),      // size: low 32 bits
             emuSharedStr.c_str()    // name of map object
         );
+#endif
 
         if (hMapObject == NULL) {
             CxbxrAbortEx(CXBXR_MODULE::INIT, "Could not map shared memory!");
@@ -112,6 +108,13 @@ bool EmuShared::Init(long long sessionID)
     // * Memory map this file
     // ******************************************************************
     {
+#if defined(CXBXR_UWP)
+        g_EmuShared = static_cast<EmuShared*>(MapViewOfFileFromApp(
+            hMapObject,
+            FILE_MAP_WRITE,
+            0,
+            0));
+#else
         g_EmuShared = (EmuShared*)MapViewOfFile
         (
             hMapObject,     // object to map view of
@@ -120,6 +123,7 @@ bool EmuShared::Init(long long sessionID)
             0,              // low offset:   beginning
             0               // default: map entire file
         );
+#endif
 
         if (g_EmuShared == nullptr) {
             CloseHandle(hMapObject);
@@ -142,7 +146,6 @@ bool EmuShared::Init(long long sessionID)
     }
 
 	return true;
-#endif
 }
 
 // ******************************************************************
@@ -150,13 +153,6 @@ bool EmuShared::Init(long long sessionID)
 // ******************************************************************
 void EmuShared::Cleanup()
 {
-#if defined(CXBXR_UWP)
-	if (g_EmuShared && --g_EmuShared->m_RefCount <= 0) {
-		g_EmuShared->EmuShared::~EmuShared();
-		std::free(g_EmuShared);
-		g_EmuShared = nullptr;
-	}
-#else
 	if (g_EmuShared != nullptr) {
 		if (--(g_EmuShared->m_RefCount) <= 0)
 			g_EmuShared->EmuShared::~EmuShared();
@@ -164,7 +160,6 @@ void EmuShared::Cleanup()
 		UnmapViewOfFile(g_EmuShared);
 		g_EmuShared = nullptr;
 	}
-#endif
 }
 
 // ******************************************************************

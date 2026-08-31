@@ -34,7 +34,9 @@
 #include "common\input\SdlJoystick.h"
 #include "common\input\InputManager.h"
 #include <Shlwapi.h>
+#if !defined(CXBXR_UWP)
 #include "common\input\LibusbDevice.h" // include this after Shlwapi.h or else it causes an error
+#endif
 #include "Logging.h"
 #include "core\kernel\support\Emu.h"
 #include "core\kernel\exports\EmuKrnl.h" // For DefaultLaunchDataPage
@@ -241,12 +243,14 @@ void ConstructHleInputDevice(DeviceState *dev, DeviceState *upstream, int type, 
 		dev->info.ucFeedbackSize = sizeof(XpadOutput);
 		if (type == to_underlying(XBOX_INPUT_DEVICE::HW_XBOX_CONTROLLER)) {
 			dev->type = XBOX_INPUT_DEVICE::HW_XBOX_CONTROLLER;
+#if !defined(CXBXR_UWP)
 			char dev_name[50];
 			g_EmuShared->GetInputDevNameSettings(dev_name, port_num);
 			if (auto Device = g_InputDeviceManager.FindDevice(std::string(dev_name))) {
 				dev->info.ucType = dynamic_cast<Libusb::LibusbDevice *>(Device.get())->GetUcType();
 				dev->info.ucSubType = dynamic_cast<Libusb::LibusbDevice *>(Device.get())->GetUcSubType();
 			}
+#endif
 		}
 		break;
 
@@ -287,12 +291,14 @@ void ConstructHleInputDevice(DeviceState *dev, DeviceState *upstream, int type, 
 		dev->info.sbc.last_in_state = 0;
 		if (type == to_underlying(XBOX_INPUT_DEVICE::HW_STEEL_BATTALION_CONTROLLER)) {
 			dev->type = XBOX_INPUT_DEVICE::HW_STEEL_BATTALION_CONTROLLER;
+#if !defined(CXBXR_UWP)
 			char dev_name[50];
 			g_EmuShared->GetInputDevNameSettings(dev_name, port_num);
 			if (auto Device = g_InputDeviceManager.FindDevice(std::string(dev_name))) {
 				dev->info.ucType = dynamic_cast<Libusb::LibusbDevice *>(Device.get())->GetUcType();
 				dev->info.ucSubType = dynamic_cast<Libusb::LibusbDevice *>(Device.get())->GetUcSubType();
 			}
+#endif
 		}
 		break;
 
@@ -751,6 +757,7 @@ xbox::dword_xt WINAPI xbox::EMUPATCH(XInputSetState)
         if (pFeedback->Header.hEvent != NULL &&
             ObReferenceObjectByHandle(pFeedback->Header.hEvent, &xbox::ExEventObjectType, (PVOID*)&pFeedback->Header.IoCompletedEvent) == ERROR_SUCCESS) {
             KeSetEvent((xbox::PKEVENT)pFeedback->Header.IoCompletedEvent, NULL, FALSE);
+            ObfDereferenceObject(pFeedback->Header.IoCompletedEvent);
         }
     }
     else {
@@ -872,6 +879,13 @@ xbox::LPVOID WINAPI xbox::EMUPATCH(CreateFiber)
 		LOG_FUNC_ARG(lpParameter)
 	LOG_FUNC_END;
 
+#if defined(CXBXR_UWP)
+	(void)dwStackSize;
+	(void)lpStartRoutine;
+	(void)lpParameter;
+	CxbxrAbort("Xbox fiber creation requires the UWP CPU backend scheduler; native host fibers cannot execute guest x86 callbacks.");
+	RETURN(nullptr);
+#else
 	// Create a Fiber Context: This has to be malloced because if it goes out of scope
 	// between CreateFiber and SwitchToFiber, it will cause a crash
 	// WARNING: Currently this leaks memory, can be fixed by tracking fibers and freeing them in DeleteFiber
@@ -879,8 +893,8 @@ xbox::LPVOID WINAPI xbox::EMUPATCH(CreateFiber)
 	context->lpStartRoutine = lpStartRoutine;
 	context->lpParameter = lpParameter;
 		
-	// CreateFiber is desktop-only. The Ex variants are in the UWP API contract.
-	RETURN(CreateFiberEx(dwStackSize, 0, 0, (LPFIBER_START_ROUTINE)EmuFiberStartup, context));
+	RETURN(CreateFiber(dwStackSize, (LPFIBER_START_ROUTINE)EmuFiberStartup, context));
+#endif
 }
 
 // ******************************************************************
@@ -892,9 +906,14 @@ xbox::void_xt WINAPI xbox::EMUPATCH(DeleteFiber)
 )
 {
 
-	LOG_FUNC_ONE_ARG((DWORD)DeleteFiber);
+	LOG_FUNC_ONE_ARG(lpFiber);
 
+#if defined(CXBXR_UWP)
+	(void)lpFiber;
+	CxbxrAbort("Xbox fiber deletion requires the UWP CPU backend scheduler.");
+#else
 	DeleteFiber(lpFiber);
+#endif
 }
 
 // ******************************************************************
@@ -908,7 +927,12 @@ xbox::void_xt WINAPI xbox::EMUPATCH(SwitchToFiber)
 
 	LOG_FUNC_ONE_ARG(lpFiber);
 
+#if defined(CXBXR_UWP)
+	(void)lpFiber;
+	CxbxrAbort("Xbox fiber switching requires the UWP CPU backend scheduler.");
+#else
 	SwitchToFiber(lpFiber);
+#endif
 }
 
 // ******************************************************************
@@ -922,108 +946,20 @@ xbox::LPVOID WINAPI xbox::EMUPATCH(ConvertThreadToFiber)
 
 	LOG_FUNC_ONE_ARG(lpParameter);
 		
-	// ConvertThreadToFiber is desktop-only; the Ex version is UWP-safe.
-	LPVOID pRet = ConvertThreadToFiberEx(lpParameter, 0);
+	// ConvertThreadToFiberEx is the UWP-contract variant. Switching the x86
+	// floating-point state is required because guest fibers execute FPU code.
+#if defined(CXBXR_UWP)
+	(void)lpParameter;
+	CxbxrAbort("Xbox fiber conversion requires the UWP CPU backend scheduler.");
+	LPVOID pRet = nullptr;
+#else
+	LPVOID pRet = ConvertThreadToFiber(lpParameter);
+#endif
 	
 	RETURN(pRet);
 }
 
-// ******************************************************************
-// * patch: SignalObjectAndWait
-// ******************************************************************
-xbox::dword_xt WINAPI xbox::EMUPATCH(SignalObjectAndWait)
-(
-	HANDLE	hObjectToSignal,
-	HANDLE	hObjectToWaitOn,
-	dword_xt	dwMilliseconds,
-	bool_xt	bAlertable
-)
-{
-	LOG_FUNC_BEGIN
-		LOG_FUNC_ARG(hObjectToSignal)
-		LOG_FUNC_ARG(hObjectToWaitOn)
-		LOG_FUNC_ARG(dwMilliseconds)
-		LOG_FUNC_ARG(bAlertable)
-		LOG_FUNC_END;
 
-	// Because user APCs from NtQueueApcThread are now handled by the kernel, we need to wait for them ourselves
-	LARGE_INTEGER NewTime;
-	PLARGE_INTEGER Timeout;
-	if (dwMilliseconds == INFINITE) {
-		Timeout = nullptr;
-	}
-	else if (dwMilliseconds == 0) {
-		Timeout = &NewTime;
-		NewTime.QuadPart = 0;
-	}
-	else {
-		Timeout = &NewTime;
-		NewTime.QuadPart = xbox::KeQueryInterruptTime();
-		NewTime.QuadPart += (static_cast<xbox::ulonglong_xt>(dwMilliseconds) * CLOCK_TIME_INCREMENT);
-	}
-
-	PKTHREAD kThread = KeGetCurrentThread();
-	kThread->WaitStatus = X_STATUS_SUCCESS;
-	if (!AddWaitObject(kThread, Timeout)) {
-		RETURN(WAIT_TIMEOUT);
-	}
-
-	xbox::ntstatus_xt status = WaitApc<true>([hObjectToSignal, hObjectToWaitOn, bAlertable](xbox::PKTHREAD kThread) -> std::optional<DWORD> {
-		DWORD dwRet = SignalObjectAndWait(hObjectToSignal, hObjectToWaitOn, 0, bAlertable);
-		if (dwRet == WAIT_TIMEOUT) {
-			return std::nullopt;
-		}
-		// If the wait was satisfied with the host, then also unwait the thread on the guest side, to be sure to remove WaitBlocks that might have been added
-		// to the thread
-		xbox::ntstatus_xt Status;
-		switch (dwRet)
-		{
-		case WAIT_ABANDONED: Status = X_STATUS_ABANDONED; break;
-		case WAIT_IO_COMPLETION: Status = X_STATUS_USER_APC; break;
-		case WAIT_OBJECT_0: Status = X_STATUS_SUCCESS; break;
-		default: Status = X_STATUS_INVALID_HANDLE;
-		}
-		xbox::KiUnwaitThreadAndLock(kThread, Status, 0);
-		return std::make_optional<ntstatus_xt>(kThread->WaitStatus);
-		}, Timeout, bAlertable, UserMode, kThread);
-
-	xbox::dword_xt ret;
-	switch (status)
-	{
-	case X_STATUS_ABANDONED: ret = WAIT_ABANDONED; break;
-	case X_STATUS_USER_APC: ret = WAIT_IO_COMPLETION; break;
-	case X_STATUS_SUCCESS: ret = WAIT_OBJECT_0; break;
-	case X_STATUS_TIMEOUT: ret = WAIT_TIMEOUT; break;
-	default: ret = WAIT_FAILED;
-	}
-	RETURN(ret);
-}
-
-// ******************************************************************
-// * patch: RaiseException
-// ******************************************************************
-xbox::void_xt WINAPI xbox::EMUPATCH(RaiseException)
-(
-	dword_xt			dwExceptionCode,       // exception code
-	dword_xt			dwExceptionFlags,      // continuable exception flag
-	dword_xt			nNumberOfArguments,    // number of arguments
-	CONST ulong_ptr_xt *lpArguments		   // array of arguments
-)
-{
-
-
-	LOG_FUNC_BEGIN
-		LOG_FUNC_ARG(dwExceptionCode)
-		LOG_FUNC_ARG(dwExceptionFlags)
-		LOG_FUNC_ARG(nNumberOfArguments)
-		LOG_FUNC_ARG(lpArguments)
-		LOG_FUNC_END;
-
-	// TODO: Implement or not?
-//	RaiseException(dwExceptionCode, dwExceptionFlags, nNumberOfArguments, (*(ULONG_PTR**) &lpArguments));
-
-	LOG_UNIMPLEMENTED();
-}
 
 // ******************************************************************
 // patch: XMountMUA
@@ -1252,17 +1188,6 @@ xbox::dword_xt WINAPI xbox::EMUPATCH(XReadMUMetaData)
 	RETURN(RtlNtStatusToDosError(status));
 }
 
-// ******************************************************************
-// * patch: OutputDebugStringA
-// ******************************************************************
-xbox::void_xt WINAPI xbox::EMUPATCH(OutputDebugStringA)
-(
-	IN LPCSTR lpOutputString
-)
-{
 
-	LOG_FUNC_ONE_ARG(lpOutputString);
-	printf("OutputDebugStringA: %s\n", lpOutputString);
-}
 
 #endif

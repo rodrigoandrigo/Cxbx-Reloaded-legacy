@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -44,6 +44,7 @@ namespace NtDll
 #include "core\kernel\init\CxbxKrnl.h" // For CxbxrAbort
 #include "core\kernel\support\Emu.h" // For EmuLog(LOG_LEVEL::WARNING, )
 #include "EmuKrnl.h" // For InsertHeadList, InsertTailList, RemoveHeadList
+#include "EmuKrnlEx.hpp" // For ETIMER, ExpDeleteTimer, etc.
 
 #include <atomic> // for std::atomic
 #pragma warning(disable:4005) // Ignore redefined status values
@@ -182,7 +183,6 @@ XBSYSAPI EXPORTNUM(13) xbox::void_xt NTAPI xbox::ExAcquireReadWriteLockShared
 	if (InterlockedIncrement(reinterpret_cast<LONG*>(&ReadWriteLock->LockCount)) != 0 && must_wait) {
 		ReadWriteLock->ReadersWaitingCount++;
 		RestoreInterruptMode(interrupt_mode);
-#if 0 //FIXME - Enable once KeReleaseSempahore is implemented (used in ExFreeReadWriteLock for Sharedlocks).
 		KeWaitForSingleObject(
 			&ReadWriteLock->ReaderSemaphore,
 			Executive,
@@ -190,7 +190,6 @@ XBSYSAPI EXPORTNUM(13) xbox::void_xt NTAPI xbox::ExAcquireReadWriteLockShared
 			0,
 			0
 		);
-#endif
 	}
 	else {
 		ReadWriteLock->ReadersEntryCount++;
@@ -286,30 +285,18 @@ XBSYSAPI EXPORTNUM(18) xbox::void_xt NTAPI xbox::ExInitializeReadWriteLock
 XBSYSAPI EXPORTNUM(19) xbox::LARGE_INTEGER NTAPI xbox::ExInterlockedAddLargeInteger
 (
 	IN OUT PLARGE_INTEGER Addend,
-	IN LARGE_INTEGER Increment,
-	IN OUT PKSPIN_LOCK Lock
+	IN LARGE_INTEGER Increment
 )
 {
 	LOG_FUNC_BEGIN
 		LOG_FUNC_ARG(Addend)
 // TODO : operator<<(LARGE_INTERGER) enables 		LOG_FUNC_ARG(Increment)
-		LOG_FUNC_ARG(Lock)
 		LOG_FUNC_END;
 
 	LARGE_INTEGER OldValue;
-// TODO :	BOOLEAN Enable;
 
-	/* Disable interrupts and acquire the spinlock */
-// TODO :	Enable = _ExiDisableInterruptsAndAcquireSpinlock(Lock);
-
-	/* Save the old value */
-	OldValue.QuadPart = Addend->QuadPart;
-
-	/* Do the operation */
-	Addend->QuadPart += Increment.QuadPart;
-
-	/* Release the spinlock and restore interrupts */
-	// TODO :	_ExiReleaseSpinLockAndRestoreInterrupts(Lock, Enable);
+	/* Atomically add and return the old value (replaces spinlock-based implementation) */
+	OldValue.QuadPart = reinterpret_cast<std::atomic<LONGLONG>*>(&Addend->QuadPart)->fetch_add(Increment.QuadPart, std::memory_order_seq_cst);
 
 	/* Return the old value */
 	return OldValue; // TODO : operator<<(LARGE_INTERGER) enables RETURN(OldValue);
@@ -330,8 +317,7 @@ XBSYSAPI EXPORTNUM(20) xbox::void_xt FASTCALL xbox::ExInterlockedAddLargeStatist
 		LOG_FUNC_ARG(Increment)
 		LOG_FUNC_END;
 
-	std::atomic<LONGLONG> Target(Addend->QuadPart);
-	Target.fetch_add(Increment);
+	reinterpret_cast<std::atomic<LONGLONG>*>(&Addend->QuadPart)->fetch_add(Increment, std::memory_order_relaxed);
 }
 
 // ******************************************************************
@@ -351,12 +337,27 @@ XBSYSAPI EXPORTNUM(21) xbox::longlong_xt FASTCALL xbox::ExInterlockedCompareExch
 		LOG_FUNC_ARG(Comparand)
 		LOG_FUNC_END;
 
-	std::atomic<LONGLONG> Target(*Destination);
-
 	LONGLONG Result = *Comparand;
-	Target.compare_exchange_strong(Result, *Exchange);
+	reinterpret_cast<std::atomic<LONGLONG>*>(Destination)->compare_exchange_strong(Result, *Exchange);
 
 	RETURN(Result);
+}
+
+// ******************************************************************
+// * ExpDeleteMutant - Mutant object delete procedure
+// ******************************************************************
+// Called by ObfDereferenceObject when the mutant's reference count drops to 0.
+// If the mutant is still owned by a thread, remove it from that thread's list.
+// Source: ReactOS
+xbox::void_xt NTAPI xbox::ExpDeleteMutant(IN xbox::PVOID ObjectBody)
+{
+	PKMUTANT Mutant = (PKMUTANT)ObjectBody;
+
+	if (Mutant->OwnerThread != nullptr) {
+		KIRQL OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
+		RemoveEntryList(&Mutant->MutantListEntry);
+		KfLowerIrql(OldIrql);
+	}
 }
 
 // ******************************************************************
@@ -367,7 +368,7 @@ XBSYSAPI EXPORTNUM(22) xbox::OBJECT_TYPE xbox::ExMutantObjectType =
 	xbox::ExAllocatePoolWithTag,
 	xbox::ExFreePool,
 	NULL,
-	NULL, // TODO : xbox::ExpDeleteMutant,
+	xbox::ExpDeleteMutant,
 	NULL,
 	(PVOID)offsetof(xbox::KMUTANT, Header),
 	'atuM' // = first four characters of "Mutant" in reverse
@@ -410,8 +411,8 @@ XBSYSAPI EXPORTNUM(24) xbox::ntstatus_xt NTAPI xbox::ExQueryNonVolatileSetting
 
 	NTSTATUS Status = X_STATUS_SUCCESS;
 	void * value_addr = nullptr;
-	int value_type;
-	int result_length;
+	int value_type = 0;
+	int result_length = 0;
 	xbox::XC_VALUE_INDEX index = (XC_VALUE_INDEX)ValueIndex;
 
 	// handle eeprom read
@@ -544,6 +545,77 @@ XBSYSAPI EXPORTNUM(25) xbox::ntstatus_xt NTAPI xbox::ExReadWriteRefurbInfo
 	RETURN(Result);
 }
 
+// Exception handler function type matching x86 SEH convention.
+// This is the actual signature of _except_handler3 / _except_handler4 etc.
+typedef xbox::EXCEPTION_DISPOSITION (NTAPI *PEXCEPTION_HANDLER_FUNC)(
+	xbox::PEXCEPTION_RECORD ExceptionRecord,
+	PVOID EstablisherFrame,
+	xbox::PCONTEXT ContextRecord,
+	PVOID DispatcherContext
+);
+
+// Manually dispatches an exception through the Xbox KPCR's exception chain.
+//
+// The Xbox exception registration chain lives in KPCR[0] (NtTib.ExceptionList).
+// All Xbox code's fs:[0] accesses are patched to read/write KPCR[0] instead of
+// the host's real fs:[0].  This means:
+//   - We must NOT use host RaiseException/RtlUnwind (they operate on real fs:[0])
+//   - We must walk KPCR[0] ourselves, calling each handler directly
+//   - Xbox handlers (like _except_handler3) will interact with KPCR[0] via
+//     their patched fs:[0] accesses, keeping everything consistent.
+//
+// For EXCEPTION_EXECUTE_HANDLER: the handler calls _global_unwind2 → RtlUnwind
+// (our kernel export, which must also walk KPCR[0]) and then longjumps to the
+// __except block.  Control never returns to this function.
+//
+// For EXCEPTION_CONTINUE_EXECUTION: the handler returns ExceptionContinueExecution
+// and we simply return from ExRaiseException, resuming the caller.
+static void DispatchExceptionThroughXboxChain(xbox::PEXCEPTION_RECORD ExceptionRecord)
+{
+	auto Pcr = EmuKeGetPcr();
+	auto Registration = Pcr->NtTib.ExceptionList;
+
+	// Provide a minimal CONTEXT for the handler (filters may inspect it)
+	xbox::CONTEXT Context = {};
+	Context.ContextFlags = 0x10001; // CONTEXT_CONTROL
+
+	PVOID DispatcherContext = nullptr;
+
+	while (Registration != reinterpret_cast<xbox::PEXCEPTION_REGISTRATION_RECORD>(-1)) {
+		auto Handler = reinterpret_cast<PEXCEPTION_HANDLER_FUNC>(Registration->Handler);
+
+		xbox::EXCEPTION_DISPOSITION Disposition = Handler(
+			ExceptionRecord,
+			Registration,
+			&Context,
+			&DispatcherContext);
+
+		switch (Disposition) {
+		case xbox::ExceptionContinueExecution:
+			// Filter said to continue — return from ExRaiseException
+			return;
+
+		case xbox::ExceptionContinueSearch:
+			// Try the next frame in the chain
+			Registration = Registration->Next;
+			continue;
+
+		case xbox::ExceptionNestedException:
+			// Nested exception during dispatch — advance past the colliding frame
+			Registration = Registration->Next;
+			continue;
+
+		default:
+			// Includes ExceptionCollidedUnwind and unknown values
+			Registration = Registration->Next;
+			continue;
+		}
+	}
+
+	// If we get here, no handler caught the exception
+	CxbxrAbort("ExRaiseException: unhandled Xbox exception 0x%08X", ExceptionRecord->ExceptionCode);
+}
+
 // ******************************************************************
 // * 0x001A - ExRaiseException()
 // ******************************************************************
@@ -555,14 +627,7 @@ XBSYSAPI EXPORTNUM(26) xbox::void_xt NTAPI xbox::ExRaiseException
 {
 	LOG_FUNC_ONE_ARG(ExceptionRecord);
 
-	// The Xbox EXCEPTION_RECORD layout is identical to the Windows one, so we
-	// can dispatch through the host Win32 SEH mechanism directly.  This allows
-	// the game's own __try/__except handlers to catch the exception as expected.
-	::RaiseException(
-		ExceptionRecord->ExceptionCode,
-		ExceptionRecord->ExceptionFlags,
-		ExceptionRecord->NumberParameters,
-		reinterpret_cast<const ULONG_PTR*>(ExceptionRecord->ExceptionInformation));
+	DispatchExceptionThroughXboxChain(ExceptionRecord);
 }
 
 // ******************************************************************
@@ -647,7 +712,7 @@ XBSYSAPI EXPORTNUM(29) xbox::ntstatus_xt NTAPI xbox::ExSaveNonVolatileSetting
 
 	NTSTATUS Status = X_STATUS_SUCCESS;
 	void * value_addr = nullptr;
-	DWORD result_length;
+	DWORD result_length = 0;
 
 	// Don't allow writing to the eeprom encrypted area
 	if (ValueIndex == XC_ENCRYPTED_SECTION)
@@ -721,11 +786,79 @@ XBSYSAPI EXPORTNUM(31) xbox::OBJECT_TYPE xbox::ExTimerObjectType =
 	xbox::ExAllocatePoolWithTag,
 	xbox::ExFreePool,
 	NULL,
-	NULL, // TODO : xbox::ExpDeleteTimer,
+	xbox::ExpDeleteTimer,
 	NULL,
 	(PVOID)offsetof(xbox::KTIMER, Header),
 	'emiT' // = first four characters of "Timer" in reverse
 };
+
+// ******************************************************************
+// * ExpDeleteTimer - Timer object delete procedure
+// ******************************************************************
+// Called by ObfDereferenceObject when the timer's reference count drops to 0
+// Source: ReactOS
+xbox::void_xt NTAPI xbox::ExpDeleteTimer(IN xbox::PVOID ObjectBody)
+{
+	PETIMER Timer = (PETIMER)ObjectBody;
+	KeCancelTimer(&Timer->KeTimer);
+	KeRemoveQueueDpc(&Timer->TimerDpc);
+	Timer->Lock.~mutex();
+}
+
+// ******************************************************************
+// * ExpTimerDpcRoutine - DPC that queues the timer APC
+// ******************************************************************
+// Source: ReactOS, simplified for Xbox
+xbox::void_xt NTAPI xbox::ExpTimerDpcRoutine
+(
+	IN xbox::PKDPC Dpc,
+	IN xbox::PVOID DeferredContext,
+	IN xbox::PVOID SystemArgument1,
+	IN xbox::PVOID SystemArgument2
+)
+{
+	PETIMER Timer = (PETIMER)DeferredContext;
+
+	// Lock the timer to check APC association
+	Timer->Lock.lock();
+
+	if (Timer->ApcAssociated) {
+		KeInsertQueueApc(&Timer->TimerApc, SystemArgument1, SystemArgument2, 0);
+	}
+
+	Timer->Lock.unlock();
+}
+
+// ******************************************************************
+// * ExpTimerApcKernelRoutine - Kernel-mode APC routine for timer APCs
+// ******************************************************************
+// Source: ReactOS, simplified for Xbox
+xbox::void_xt NTAPI xbox::ExpTimerApcKernelRoutine
+(
+	IN xbox::PKAPC Apc,
+	IN xbox::PKNORMAL_ROUTINE *NormalRoutine,
+	IN xbox::PVOID *NormalContext,
+	IN xbox::PVOID *SystemArgument1,
+	IN xbox::PVOID *SystemArgument2
+)
+{
+	PETIMER Timer = CONTAINING_RECORD(Apc, ETIMER, TimerApc);
+
+	Timer->Lock.lock();
+
+	if (Timer->ApcAssociated) {
+		// If non-periodic, disassociate the APC
+		if (!Timer->Period) {
+			Timer->ApcAssociated = FALSE;
+		}
+	}
+	else {
+		// Timer was cancelled - suppress the normal routine
+		*NormalRoutine = NULL;
+	}
+
+	Timer->Lock.unlock();
+}
 
 // ******************************************************************
 // * 0x0020 - ExfInterlockedInsertHeadList()

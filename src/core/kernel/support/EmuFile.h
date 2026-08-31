@@ -11,7 +11,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -34,6 +34,36 @@
 #include <memory>
 #include <unordered_set>
 #include <shared_mutex>
+
+inline ::HANDLE CxbxCreateHostFile(
+    const std::filesystem::path& path,
+    DWORD desiredAccess,
+    DWORD shareMode,
+    DWORD creationDisposition,
+    DWORD flagsAndAttributes)
+{
+#if defined(CXBXR_UWP)
+    CREATEFILE2_EXTENDED_PARAMETERS parameters{};
+    parameters.dwSize = sizeof(parameters);
+    parameters.dwFileAttributes = flagsAndAttributes & 0x0000FFFFu;
+    parameters.dwFileFlags = flagsAndAttributes & 0xFFF00000u;
+    parameters.dwSecurityQosFlags = flagsAndAttributes & 0x000F0000u;
+    return CreateFile2FromAppW(path.c_str(), desiredAccess, shareMode,
+        creationDisposition, &parameters);
+#else
+    return CreateFileW(path.c_str(), desiredAccess, shareMode, nullptr,
+        creationDisposition, flagsAndAttributes, nullptr);
+#endif
+}
+
+inline BOOL CxbxDeleteHostFile(const std::filesystem::path& path)
+{
+#if defined(CXBXR_UWP)
+    return DeleteFileFromAppW(path.c_str());
+#else
+    return DeleteFileW(path.c_str());
+#endif
+}
 
 // ******************************************************************
 // * prevent name collisions
@@ -288,6 +318,22 @@ bool EmuDiskFormatPartition(xbox::dword_xt PartitionNumber);
 using CxbxIoDispatcherContext = std::tuple<xbox::PIO_STATUS_BLOCK, xbox::PIO_APC_ROUTINE, PVOID>;
 
 void NTAPI CxbxIoApcDispatcher
+(
+	PVOID                  ApcContext,
+	xbox::PIO_STATUS_BLOCK IoStatusBlock,
+	xbox::ulong_xt         Reserved
+);
+
+// Context for I/O operations that need to signal an Xbox event on completion.
+// Used when the game passes an Event handle to NtReadFile/NtWriteFile.
+struct CxbxIoEventContext {
+	xbox::PKEVENT          Event;           // Xbox event to signal on completion
+	xbox::PIO_STATUS_BLOCK IoStatusBlock;   // Original IoStatusBlock
+	xbox::PIO_APC_ROUTINE  OriginalApc;     // Original game APC (may be nullptr)
+	PVOID                  OriginalContext;  // Original game APC context
+};
+
+void NTAPI CxbxIoEventApcDispatcher
 (
 	PVOID                  ApcContext,
 	xbox::PIO_STATUS_BLOCK IoStatusBlock,

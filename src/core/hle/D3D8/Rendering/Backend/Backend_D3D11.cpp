@@ -109,7 +109,8 @@ ComPtr<ID3D11BlendState>        g_pD3DBlendState;
 // ******************************************************************
    	   ID3D11Buffer *g_pD3D11VSConstantBuffer = nullptr;
 float         g_D3D11VSConstants[CXBX_D3D11_VS_CB_COUNT][4] = {};
-bool          g_bD3D11VSConstantsDirty = true;
+UINT          g_D3D11VSConstantsDirtyMin = 0;
+UINT          g_D3D11VSConstantsDirtyMax = CXBX_D3D11_VS_CB_COUNT; // full upload on first frame
 
 // ******************************************************************
 // * Blit shader resources (StretchRect replacement)
@@ -173,8 +174,6 @@ ID3D11Buffer              *g_pD3D11FormatConvertCB = nullptr; // constant buffer
 // ******************************************************************
 ID3D11PixelShader         *g_pD3D11RCInterpreterPS = nullptr;
 ID3D11Buffer              *g_pD3D11RCInterpreterAuxCB = nullptr; // PSAuxCBLayout (software-computed fields)
-ID3D11Buffer              *g_pD3D11PGRegsBuf = nullptr;          // pg->regs[] structured buffer
-ID3D11ShaderResourceView  *g_pD3D11PGRegsSRV = nullptr;          // SRV for g_PGRegs : register(t12)
 
 // ******************************************************************
 // * Vertex shader interpreter (VS ubershader) resources
@@ -182,7 +181,7 @@ ID3D11ShaderResourceView  *g_pD3D11PGRegsSRV = nullptr;          // SRV for g_PG
 bool                       g_bUseVSInterpreter = true; // default on — ubershader path
 ID3D11VertexShader        *g_pD3D11VSInterpreterVS = nullptr;
 ID3DBlob                  *g_pD3D11VSInterpreterBytecode = nullptr; // kept for input layout creation
-ID3D11Buffer              *g_pD3D11XFPRBuf = nullptr;           // XFPR (Transform Program RAM) structured buffer — pg->program_data[]
+ID3D11Buffer              *g_pD3D11XFPRBuf = nullptr;           // XFPR (Transform Program RAM) structured buffer — pg->xf.xfpr[]
 ID3D11ShaderResourceView  *g_pD3D11XFPRSRV = nullptr;           // SRV for g_XFPR : register(t5)
 
 // ******************************************************************
@@ -344,16 +343,23 @@ void CxbxSetVertexShaderConstantF(UINT startRegister, const float* pConstantData
 
 	UINT count = endRegister - startRegister;
 	memcpy(g_D3D11VSConstants[startRegister], pConstantData, count * sizeof(float) * 4);
-	g_bD3D11VSConstantsDirty = true;
+
+	// Expand dirty range to cover the written registers
+	if (startRegister < g_D3D11VSConstantsDirtyMin)
+		g_D3D11VSConstantsDirtyMin = startRegister;
+	if (endRegister > g_D3D11VSConstantsDirtyMax)
+		g_D3D11VSConstantsDirtyMax = endRegister;
 }
 
 void CxbxD3D11FlushVertexShaderConstants()
 {
-	if (!g_pD3D11VSConstantBuffer || !g_bD3D11VSConstantsDirty)
+	if (!g_pD3D11VSConstantBuffer || g_D3D11VSConstantsDirtyMin >= g_D3D11VSConstantsDirtyMax)
 		return;
 
-	CxbxD3D11UpdateDynamicBuffer(g_pD3D11VSConstantBuffer, g_D3D11VSConstants, sizeof(g_D3D11VSConstants));
-	g_bD3D11VSConstantsDirty = false;
+	g_pD3DDeviceContext->UpdateSubresource(g_pD3D11VSConstantBuffer, 0, nullptr, g_D3D11VSConstants, 0, 0);
+
+	g_D3D11VSConstantsDirtyMin = CXBX_D3D11_VS_CB_COUNT;
+	g_D3D11VSConstantsDirtyMax = 0;
 }
 
 // ******************************************************************
@@ -380,8 +386,12 @@ bool CxbxD3D11InitRCInterpreter()
 		return false;
 	}
 
-	// Create the auxiliary constant buffer (software-computed fields only)
-	hr = CxbxD3D11CreateConstantBuffer(sizeof(PSAuxCBLayout), true, &g_pD3D11RCInterpreterAuxCB);
+	// Create the auxiliary constant buffer (software-computed fields only).
+	// Kept as DEFAULT + UpdateSubresource: benchmarking showed Map/WRITE_DISCARD
+	// was ~12% slower for this 112-byte buffer (544-616 fps vs 656-708 fps).
+	// Small isolated CB updates are faster via UpdateSubresource (driver can
+	// DMA-copy from the command buffer without allocation overhead).
+	hr = CxbxD3D11CreateConstantBuffer(sizeof(PSAuxCBLayout), false, &g_pD3D11RCInterpreterAuxCB);
 	if (FAILED(hr)) {
 		EmuLog(LOG_LEVEL::WARNING, "RC Interpreter CreateConstantBuffer (aux) failed: 0x%08X", hr);
 		g_pD3D11RCInterpreterPS->Release();
@@ -389,45 +399,9 @@ bool CxbxD3D11InitRCInterpreter()
 		return false;
 	}
 
-	// Create the PGRAPH regs[] StructuredBuffer<uint> (2048 elements × 4 bytes = 8 KB)
-	// NV_PGRAPH_SIZE = 0x2000/4 = 2048 (from nv2a_int.h)
-	static const UINT PGRAPH_REG_COUNT = 2048;
-	{
-		D3D11_BUFFER_DESC desc = {};
-		desc.ByteWidth = PGRAPH_REG_COUNT * sizeof(uint32_t); // 8192 bytes
-		desc.Usage = D3D11_USAGE_DYNAMIC;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-		desc.StructureByteStride = sizeof(uint32_t); // 4 bytes per element
-		hr = g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pD3D11PGRegsBuf);
-		if (FAILED(hr)) {
-			EmuLog(LOG_LEVEL::WARNING, "RC Interpreter CreateBuffer (PGRegs) failed: 0x%08X", hr);
-			goto fail;
-		}
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = DXGI_FORMAT_UNKNOWN; // structured buffer
-		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-		srvDesc.Buffer.FirstElement = 0;
-		srvDesc.Buffer.NumElements = PGRAPH_REG_COUNT; // 2048
-		hr = g_pD3DDevice->CreateShaderResourceView(g_pD3D11PGRegsBuf, &srvDesc, &g_pD3D11PGRegsSRV);
-		if (FAILED(hr)) {
-			EmuLog(LOG_LEVEL::WARNING, "RC Interpreter CreateSRV (PGRegs) failed: 0x%08X", hr);
-			goto fail;
-		}
-	}
-
-	EmuLog(LOG_LEVEL::INFO, "RC Interpreter ubershader loaded successfully (%u byte aux cbuffer, %u byte regs SRV)",
-		(unsigned)sizeof(PSAuxCBLayout), (unsigned)(PGRAPH_REG_COUNT * sizeof(uint32_t)));
+	EmuLog(LOG_LEVEL::INFO, "RC Interpreter ubershader loaded successfully (%u byte aux cbuffer)",
+		(unsigned)sizeof(PSAuxCBLayout));
 	return true;
-
-fail:
-	if (g_pD3D11PGRegsSRV) { g_pD3D11PGRegsSRV->Release(); g_pD3D11PGRegsSRV = nullptr; }
-	if (g_pD3D11PGRegsBuf) { g_pD3D11PGRegsBuf->Release(); g_pD3D11PGRegsBuf = nullptr; }
-	if (g_pD3D11RCInterpreterAuxCB) { g_pD3D11RCInterpreterAuxCB->Release(); g_pD3D11RCInterpreterAuxCB = nullptr; }
-	if (g_pD3D11RCInterpreterPS) { g_pD3D11RCInterpreterPS->Release(); g_pD3D11RCInterpreterPS = nullptr; }
-	return false;
 }
 
 
@@ -496,37 +470,7 @@ bool CxbxD3D11InitVSInterpreter()
 		}
 	}
 
-	// Ensure the shared PGRegs StructuredBuffer exists (normally created by RC interpreter init,
-	// but the VS interpreter also needs it for reading PGRAPH registers like CSV0_C)
-	if (!g_pD3D11PGRegsBuf) {
-		static const UINT PGRAPH_REG_COUNT = 2048;
-		D3D11_BUFFER_DESC desc = {};
-		desc.ByteWidth = PGRAPH_REG_COUNT * sizeof(uint32_t);
-		desc.Usage = D3D11_USAGE_DYNAMIC;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-		desc.StructureByteStride = sizeof(uint32_t);
-		hr = g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pD3D11PGRegsBuf);
-		if (FAILED(hr)) {
-			EmuLog(LOG_LEVEL::WARNING, "VS Interpreter CreateBuffer (PGRegs) failed: 0x%08X", hr);
-			// Non-fatal: interpreter can still work without PGRAPH regs (will use startSlot=0)
-		}
-	}
-	if (g_pD3D11PGRegsBuf && !g_pD3D11PGRegsSRV) {
-		static const UINT PGRAPH_REG_COUNT = 2048;
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-		srvDesc.Buffer.FirstElement = 0;
-		srvDesc.Buffer.NumElements = PGRAPH_REG_COUNT;
-		hr = g_pD3DDevice->CreateShaderResourceView(g_pD3D11PGRegsBuf, &srvDesc, &g_pD3D11PGRegsSRV);
-		if (FAILED(hr)) {
-			EmuLog(LOG_LEVEL::WARNING, "VS Interpreter CreateSRV (PGRegs) failed: 0x%08X", hr);
-		}
-	}
-
-	EmuLog(LOG_LEVEL::INFO, "VS Interpreter ubershader loaded successfully (%u byte XFPR SRV, shared PGRegs SRV at t%u)",
+	EmuLog(LOG_LEVEL::INFO, "VS Interpreter ubershader loaded successfully (%u byte XFPR SRV, shared mirror SRV at t%u)",
 		(unsigned)(XFPR_LENGTH * 4 * sizeof(uint32_t)),
 		(unsigned)CXBX_D3D11_VS_PGREGS_SRV_SLOT);
 	return true;
@@ -611,7 +555,7 @@ void CxbxD3D11InitBlit()
 	}
 
 	// Create GS constant buffer (1 float4: inverse viewport dimensions + line width)
-	hr = CxbxD3D11CreateConstantBuffer(16, true, &g_pD3D11GSConstantBuffer);
+	hr = CxbxD3D11CreateConstantBuffer(16, false, &g_pD3D11GSConstantBuffer);
 	if (FAILED(hr)) {
 		EmuLog(LOG_LEVEL::WARNING, "CxbxD3D11InitBlit: Failed to create GS constant buffer");
 	}
@@ -786,7 +730,7 @@ HRESULT CxbxD3D11Blt(
 	// Create temporary SRV for source
 	ID3D11ShaderResourceView* pSRV = nullptr;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.Format = srcDesc.Format;
+	srvDesc.Format = (srcDesc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS) ? DXGI_FORMAT_R8G8B8A8_UNORM : srcDesc.Format;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MipLevels = 1;
 	HRESULT hr = g_pD3DDevice->CreateShaderResourceView(pSrc, &srvDesc, &pSRV);
@@ -903,8 +847,6 @@ void CxbxD3D11ReleaseBackendResources()
 	if (g_pD3D11FormatConvertCB) { g_pD3D11FormatConvertCB->Release(); g_pD3D11FormatConvertCB = nullptr; }
 	if (g_pD3D11RCInterpreterPS) { g_pD3D11RCInterpreterPS->Release(); g_pD3D11RCInterpreterPS = nullptr; }
 	if (g_pD3D11RCInterpreterAuxCB) { g_pD3D11RCInterpreterAuxCB->Release(); g_pD3D11RCInterpreterAuxCB = nullptr; }
-	if (g_pD3D11PGRegsSRV) { g_pD3D11PGRegsSRV->Release(); g_pD3D11PGRegsSRV = nullptr; }
-	if (g_pD3D11PGRegsBuf) { g_pD3D11PGRegsBuf->Release(); g_pD3D11PGRegsBuf = nullptr; }
 	if (g_pD3D11VSInterpreterVS) { g_pD3D11VSInterpreterVS->Release(); g_pD3D11VSInterpreterVS = nullptr; }
 	if (g_pD3D11VSInterpreterBytecode) { g_pD3D11VSInterpreterBytecode->Release(); g_pD3D11VSInterpreterBytecode = nullptr; }
 	if (g_pD3D11XFPRSRV) { g_pD3D11XFPRSRV->Release(); g_pD3D11XFPRSRV = nullptr; }

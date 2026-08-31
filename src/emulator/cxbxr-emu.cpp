@@ -30,6 +30,7 @@
 #define LOG_PREFIX CXBXR_MODULE::CXBXR
 
 #include "Cxbx.h" // For FUNC_EXPORTS
+#include "common/CxbxEmbedRuntime.h"
 #include "VerifyAddressRanges.h" // For VerifyBaseAddr()
 //#include "CxbxKrnl/Emu.h"
 #include "EmuShared.h"
@@ -127,6 +128,13 @@ CommandLineToArgvA(
 DWORD WINAPI Emulate(unsigned int reserved_systems, blocks_reserved_t blocks_reserved)
 {
 	FUNC_EXPORTS
+#if defined(CXBXR_UWP)
+	(void)reserved_systems;
+	(void)blocks_reserved;
+	CxbxEmbedRuntimeReportError(CXBX_EMBED_INVALID_STATE,
+		"The legacy process-owning Emulate entry point is unavailable in UWP; use CxbxEmbedStart.");
+	return ERROR_NOT_SUPPORTED;
+#else
 
 	/*! Verify our host executable, cxbxr-ldr.exe, is loaded to base address 0x00010000 */
 	if (!VerifyBaseAddr()) {
@@ -168,9 +176,8 @@ DWORD WINAPI Emulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 
 	// Check if the loader version matches the emu version and abort otherwise
 	if (std::strncmp(GetGitVersionStr(), reinterpret_cast<char *>(PHYSICAL_MAP1_BASE + 0x1000), GetGitVersionLength()) != 0) {
-		PopupError(nullptr, "Mismatch detected between cxbxr-ldr.exe and cxbxr-emu.dll, aborting.");
-		EmuShared::Cleanup();
-		return EXIT_FAILURE;
+		PopupError(nullptr, "Mismatch detected between cxbxr-ldr.exe and cxbxr-emu.dll, continue at your own risk!"
+			"\n\nPlease extract all contents from zip file and do not mix with older/newer builds.");
 	}
 
 	if (!HandleFirstLaunch()) {
@@ -194,8 +201,14 @@ DWORD WINAPI Emulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	// because that function resides in a block of memory that's overwritten with
 	// xbox executable contents. Returning there would lead to undefined behaviour.
 	// Since we're done emulating, it's al right to terminate here :
+	if (CxbxEmbedRuntimeIsActive()) {
+		CxbxEmbedRuntimeReportError(CXBX_EMBED_LAUNCH_FAILED, "Legacy Emulate entry point returned unexpectedly.");
+		CxbxEmbedRuntimeRequestStop();
+		return EXIT_FAILURE;
+	}
 	TerminateProcess(GetCurrentProcess(), EXIT_SUCCESS);
 
 	// This line will never be reached:
 	return EXIT_FAILURE;
+#endif
 }

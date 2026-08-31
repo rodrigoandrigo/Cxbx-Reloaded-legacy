@@ -39,9 +39,11 @@
 #include <thread>
 #include "core\kernel\support\Emu.h"
 #include "SdlJoystick.h"
+#if !defined(CXBXR_UWP)
 #include "XInputPad.h"
 #include "DInputKeyboardMouse.h"
 #include "LibusbDevice.h"
+#endif
 #include "InputManager.h"
 
 // These values are those used by Dolphin!
@@ -64,7 +66,7 @@ namespace Sdl
 		uint32_t CustomEvent_t;
 		std::unique_lock<std::mutex> lck(Mtx);
 
-		if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) < 0) {
+		if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC)) {
 			EmuLog(LOG_LEVEL::ERROR2, "Failed to initialize SDL subsystem! The error was: %s", SDL_GetError());
 			InitStatus = INIT_ERROR;
 			lck.unlock();
@@ -141,9 +143,12 @@ namespace Sdl
 				}
 			}
 			else if (Event.type == PopulateEvent_t) {
-				for (int i = 0; i < SDL_NumJoysticks(); i++) {
-					OpenSdlDevice(i);
+				int count = 0;
+				SDL_JoystickID* devices = SDL_GetJoysticks(&count);
+				for (int i = 0; devices && i < count; ++i) {
+					OpenSdlDevice(devices[i]);
 				}
+				SDL_free(devices);
 				PopulateOK = true;
 				Cv.notify_one();
 			}
@@ -155,9 +160,11 @@ namespace Sdl
 					g_InputDeviceManager.UpdateOpt(is_gui);
 				}
 				else {
+#if !defined(CXBXR_UWP)
 					XInput::GetDeviceChanges();
 					DInput::GetDeviceChanges();
 					Libusb::GetDeviceChanges();
+#endif
 					std::string port = std::to_string(*static_cast<int *>(Event.user.data1));
 					int port_num, slot;
 					PortStr2Int(port, &port_num, &slot);
@@ -196,13 +203,13 @@ namespace Sdl
 		Thr.join();
 	}
 
-	void OpenSdlDevice(const int Index)
+	void OpenSdlDevice(const SDL_JoystickID device_id)
 	{
-		SDL_Joystick* pJoystick = SDL_JoystickOpen(Index);
+		SDL_Joystick* pJoystick = SDL_JoystickOpen(device_id);
 		if (pJoystick) {
-			auto Device = std::make_shared<Sdl::SdlJoystick>(pJoystick, Index);
+			auto Device = std::make_shared<Sdl::SdlJoystick>(pJoystick, device_id);
 			if (Device->IsXInput()) {
-				EmuLog(LOG_LEVEL::INFO, "Rejected joystick %i. It will be handled by XInput", Index);
+				EmuLog(LOG_LEVEL::INFO, "Rejected joystick %d. It will be handled by XInput", device_id);
 				return;
 			}
 			// only add the device if it has some I/O controls
@@ -210,11 +217,11 @@ namespace Sdl
 				g_InputDeviceManager.AddDevice(std::move(Device));
 			}
 			else {
-				EmuLog(LOG_LEVEL::INFO, "Rejected joystick %i. No controls detected", Index);
+				EmuLog(LOG_LEVEL::INFO, "Rejected joystick %d. No controls detected", device_id);
 			}
 		}
 		else {
-			EmuLog(LOG_LEVEL::ERROR2, "Failed to open joystick %i. The error was %s", Index, SDL_GetError());
+			EmuLog(LOG_LEVEL::ERROR2, "Failed to open joystick %d. The error was %s", device_id, SDL_GetError());
 		}
 	}
 
@@ -234,9 +241,9 @@ namespace Sdl
 		SDL_PushEvent(&PopulateEvent);
 	}
 
-	SdlJoystick::SdlJoystick(SDL_Joystick* const Joystick, const int Index)
+	SdlJoystick::SdlJoystick(SDL_Joystick* const Joystick, const SDL_JoystickID device_id)
 		: m_Joystick(Joystick), m_Sdl_ID(SDL_JoystickInstanceID(Joystick)),
-		m_DeviceName(StripSpaces(SDL_JoystickNameForIndex(Index))), m_bIsXInput(false)
+		m_DeviceName(StripSpaces(SDL_GetJoystickName(Joystick))), m_bIsXInput(false)
 	{
 		uint8_t i;
 		int NumButtons, NumAxes, NumHats, NumBalls;
@@ -341,7 +348,7 @@ namespace Sdl
 			}
 		}
 		else {
-			EmuLog(LOG_LEVEL::INFO, "Joystick %i doesn't support any haptic effects", Index);
+			EmuLog(LOG_LEVEL::INFO, "Joystick %d doesn't support any haptic effects", device_id);
 		}
 
 		// init dirty flag

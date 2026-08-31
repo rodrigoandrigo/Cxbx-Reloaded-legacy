@@ -30,7 +30,7 @@
 
 
 #include <core\kernel\exports\xboxkrnl.h>
-#include <dsound.h>
+#include "core/hle/DSOUND/DsoundHostTypes.h"
 #include "DirectSoundGlobal.hpp" // Global variables
 #include <common/Timer.h>
 
@@ -127,7 +127,14 @@ xbox::hresult_xt WINAPI xbox::EMUPATCH(DirectSoundCreate)
     g_bDSoundCreateCalled = TRUE;
 
     if (!initialized || g_pDSound8 == nullptr) {
+#if defined(CXBXR_UWP)
+        // DirectSound is not part of the UWP API surface. The Xbox-facing
+        // DSOUND HLE remains intact, but requires an SDL3 host-audio adapter
+        // before buffers can be created on this target.
+        hRet = DSERR_NODRIVER;
+#else
         hRet = DirectSoundCreate8(&g_XBAudio.adapterGUID, &g_pDSound8, nullptr);
+#endif
 
         LPCSTR dsErrorMsg = nullptr;
 
@@ -204,7 +211,8 @@ xbox::hresult_xt WINAPI xbox::EMUPATCH(DirectSoundCreate)
         // But how to set DSBCAPS_CTRLFX on primary buffer or should it be set for all current and future cache buffers?
         // We need LPDIRECTSOUNDFXI3DL2REVERB8 / IID_IDirectSoundFXI3DL2Reverb8 or use LPDIRECTSOUNDBUFFER8 / IID_IDirectSoundBuffer8
 
-        hRet = g_pDSoundPrimaryBuffer->QueryInterface(IID_IDirectSound3DListener8, (LPVOID*)&g_pDSoundPrimary3DListener8);
+        hRet = g_pDSoundPrimaryBuffer->QueryInterface(IID_IDirectSound3DListener8,
+            reinterpret_cast<::LPVOID*>(&g_pDSoundPrimary3DListener8));
 
         if (hRet != DS_OK) {
             CxbxrAbort("Creating primary 3D Listener for DirectSound Failed!");
@@ -450,11 +458,13 @@ void StreamBufferAudio(xbox::XbHybridDSBuffer* pHybridBuffer, float msToCopy) {
 
 void dsound_async_worker()
 {
-    DSoundMutexGuardLock;
-
-    xbox::LARGE_INTEGER getTime;
-    xbox::KeQuerySystemTime(&getTime);
-    DirectSoundDoWork_Stream(getTime);
+    // Do NOT process stream packets from the system_events timer thread.
+    // DirectSoundDoWork_Stream → DSStream_Packet_Process → Xb_lpfnCallback
+    // invokes game callbacks that may block in KeWaitForSingleObject, which
+    // stalls VBlank delivery and starves the DPC thread — causing deadlock.
+    // Stream packet processing is handled by the game's own DirectSoundDoWork
+    // calls on its own thread where blocking is safe.
+    return;
 }
 
 void dsound_worker()
@@ -462,8 +472,12 @@ void dsound_worker()
     // Testcase: Gauntlet Dark Legacy, if Sleep(1) then intro videos start to starved often
     // unless console is open with logging enabled. This is the cause of stopping intro videos often.
 
-    // Enforce mutex guard lock only occur inside below bracket for proper compile build.
-    DSoundMutexGuardLock;
+    // Use try_lock to avoid blocking the system_events thread.
+    // If a game thread holds g_DSoundMutex (e.g. inside a stream completion
+    // callback that calls KeWaitForSingleObject), blocking here would stall
+    // VBlank delivery and starve the DPC thread — causing deadlock.
+    std::unique_lock<std::recursive_mutex> guard(g_DSoundMutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
 
 	// Stream sound buffer audio
 	// because the title may change the content of sound buffers at any time
@@ -481,18 +495,19 @@ void dsound_worker()
 	}
 }
 
-uint64_t dsound_next(uint64_t now)
+uint64_t dsound_tick(uint64_t now)
 {
-    constexpr uint64_t dsound_period = 300 * 1000;
+    // 300ms in QPC ticks
+    const int64_t dsound_period = HostQPCFrequency * 300 / 1000;
     uint64_t next = dsound_last + dsound_period;
 
     if (now >= next) {
         dsound_async_worker();
-        dsound_last = get_now();
-        return dsound_period;
+        dsound_last = now;
+        return now + dsound_period;
     }
 
-    return dsound_last + dsound_period - now; // time remaining until next dsound async event
+    return next;
 }
 
 // Kismet given name for RadWolfie's experiment major issue in the mutt.

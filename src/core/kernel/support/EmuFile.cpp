@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -33,6 +33,7 @@
 #include <string>
 #include <sstream>
 #include <fstream>
+#include <atomic>
 #include <cassert>
 #include <Shlobj.h>
 #include <Shlwapi.h>
@@ -186,7 +187,7 @@ bool CxbxrIsPathInsideEmuMu(const std::filesystem::path& path)
 
 void CxbxCreatePartitionHeaderFile(const std::filesystem::path& filename, bool partition0, std::size_t size)
 {
-	HANDLE hf = CreateFileW(filename.c_str(), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+	HANDLE hf = CxbxCreateHostFile(filename, GENERIC_WRITE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL);
 	if (!hf) {
 		CxbxrAbort("CxbxCreatePartitionHeaderFile Failed\nUnable to create file: %s (%s)", filename.u8string().c_str());
 		return;
@@ -219,7 +220,7 @@ XboxPartitionTable CxbxGetPartitionTable()
 	// Or invalid partition tables left behind from previous versions
 	// of Cxbx-Reloaded
 	if (memcmp(table.Magic, BackupPartTbl.Magic, 16) != 0) {
-		DeleteFile((g_DiskBasePath + "Partition0.bin").c_str());
+		CxbxDeleteHostFile(std::filesystem::path(g_DiskBasePath + "Partition0.bin"));
 		CxbxCreatePartitionHeaderFile(g_DiskBasePath + "Partition0.bin", true);
 		memcpy(&table, &BackupPartTbl, sizeof(XboxPartitionTable));
 	}
@@ -266,6 +267,21 @@ void NTAPI CxbxIoApcDispatcher(PVOID ApcContext, xbox::PIO_STATUS_BLOCK /*IoStat
 	std::get<xbox::PIO_APC_ROUTINE>(*cxbxContext)(
 		std::get<LPVOID>(*cxbxContext),std::get<xbox::PIO_STATUS_BLOCK>(*cxbxContext), Reserved);
 	delete cxbxContext;
+}
+
+void NTAPI CxbxIoEventApcDispatcher(PVOID ApcContext, xbox::PIO_STATUS_BLOCK IoStatusBlock, xbox::ulong_xt Reserved)
+{
+	CxbxIoEventContext* ctx = reinterpret_cast<CxbxIoEventContext*>(ApcContext);
+
+	// Signal the Xbox event to wake any thread waiting on it
+	xbox::KeSetEvent(ctx->Event, /*Increment=*/1, /*Wait=*/FALSE);
+
+	// If the game also provided an APC routine, call it
+	if (ctx->OriginalApc) {
+		ctx->OriginalApc(ctx->OriginalContext, ctx->IoStatusBlock, Reserved);
+	}
+
+	delete ctx;
 }
 
 const std::string PartitionPrefix = "Partition";
@@ -690,7 +706,7 @@ void CxbxLaunchNewXbe(const std::string& XbePath) {
 	}
 	else
 	{
-		if (const auto &err = CxbxrExec(false, nullptr, false))
+		if (const auto &err = CxbxrExec(false, nullptr, false, /*isReboot=*/true))
 		{
 			CxbxrAbort("Could not launch %s\n\nThe reason was: %s", XbePath.c_str(), err->c_str());
 		}

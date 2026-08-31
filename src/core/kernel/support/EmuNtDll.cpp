@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -38,7 +38,7 @@ namespace NtDll
 // ******************************************************************
 // * Loaded at run-time to avoid linker conflicts
 // ******************************************************************
-static HMODULE hNtDll = GetModuleHandle("ntdll");
+static HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
 
 #define IMPORT(API) NtDll::FPTR_##API NtDll::API = (NtDll::FPTR_##API)GetProcAddress(hNtDll, #API)
 
@@ -54,15 +54,9 @@ IMPORT(InterlockedPopEntrySList);
 IMPORT(InterlockedPushEntrySList);
 */
 IMPORT(NtAllocateVirtualMemory);
-IMPORT(NtCancelTimer);
-IMPORT(NtClearEvent);
 IMPORT(NtClose);
 IMPORT(NtCreateDirectoryObject);
-IMPORT(NtCreateEvent);
 IMPORT(NtCreateFile);
-IMPORT(NtCreateMutant);
-IMPORT(NtCreateSemaphore);
-IMPORT(NtCreateTimer);
 IMPORT(NtDelayExecution);
 IMPORT(NtDeleteFile);
 IMPORT(NtDeviceIoControlFile);
@@ -71,29 +65,17 @@ IMPORT(NtFlushBuffersFile);
 IMPORT(NtFreeVirtualMemory);
 IMPORT(NtFsControlFile);
 IMPORT(NtOpenSymbolicLinkObject);
-IMPORT(NtPulseEvent);
 IMPORT(NtQueryDirectoryFile);
-IMPORT(NtQueryEvent);
 IMPORT(NtQueryFullAttributesFile);
 IMPORT(NtQueryInformationFile);
-IMPORT(NtQueryMutant);
-IMPORT(NtQuerySemaphore);
-IMPORT(NtQueryTimer);
 IMPORT(NtQueryVirtualMemory);
 IMPORT(NtQueryVolumeInformationFile);
 IMPORT(NtQueueApcThread);
 IMPORT(NtReadFile);
-IMPORT(NtReleaseMutant);
-IMPORT(NtReleaseSemaphore);
 IMPORT(NtResumeThread);
-IMPORT(NtResetEvent);
-IMPORT(NtSetEvent);
 IMPORT(NtSetInformationFile);
 IMPORT(NtSetLdtEntries);
-IMPORT(NtSetTimer);
 IMPORT(NtSuspendThread);
-IMPORT(NtWaitForMultipleObjects);
-IMPORT(NtWaitForSingleObject);
 IMPORT(NtWriteFile);
 IMPORT(NtYieldExecution);
 IMPORT(RtlAllocateHeap);

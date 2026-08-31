@@ -336,7 +336,7 @@ static inline void DSoundGenericUnlock(
     DWORD                   dwEmuFlags,
     LPDIRECTSOUNDBUFFER8    pDSBuffer,
     DSBUFFERDESC           &DSBufferDesc,
-    xbox::DSoundBuffer_Lock &Host_lock,
+    xbox::HostDSoundBuffer_Lock &Host_lock,
     LPVOID                  X_BufferCache,
     DWORD                   X_Offset,
     DWORD                   X_dwLockBytes1,
@@ -375,7 +375,8 @@ static inline HRESULT DSoundBufferCreate(LPDSBUFFERDESC pDSBufferDesc, LPDIRECTS
     HRESULT hRetDS = g_pDSound8->CreateSoundBuffer(pDSBufferDesc, &pTempBuffer, nullptr);
 
     if (hRetDS == DS_OK) {
-        hRetDS = pTempBuffer->QueryInterface(IID_IDirectSoundBuffer8, (LPVOID*)&(pDSBuffer));
+        hRetDS = pTempBuffer->QueryInterface(IID_IDirectSoundBuffer8,
+            reinterpret_cast<::LPVOID*>(&(pDSBuffer)));
         pTempBuffer->Release();
         if (pDSBuffer == nullptr) {
             EmuLog(LOG_LEVEL::WARNING, "CreateSoundBuffer:QueryInterface Failed!");
@@ -388,7 +389,8 @@ static inline HRESULT DSoundBufferCreate(LPDSBUFFERDESC pDSBufferDesc, LPDIRECTS
 }
 
 static inline void DSound3DBufferCreate(LPDIRECTSOUNDBUFFER8 pDSBuffer, LPDIRECTSOUND3DBUFFER8 &pDS3DBuffer) {
-    HRESULT hRetDS3D = pDSBuffer->QueryInterface(IID_IDirectSound3DBuffer, (LPVOID*)&(pDS3DBuffer));
+    HRESULT hRetDS3D = pDSBuffer->QueryInterface(IID_IDirectSound3DBuffer,
+        reinterpret_cast<::LPVOID*>(&(pDS3DBuffer)));
     if (hRetDS3D != DS_OK) {
         EmuLog(LOG_LEVEL::WARNING, "CreateSound3DBuffer Failed!");
         pDS3DBuffer = nullptr;

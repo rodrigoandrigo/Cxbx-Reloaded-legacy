@@ -33,6 +33,18 @@
 
 namespace xbox
 {
+	// Xbox kernel ABI pointers are always 32-bit.  On an x64 host MSVC's
+	// __ptr32 keeps their storage/layout correct while still allowing direct
+	// access to Cxbx's low 4 GiB guest address space.
+	#if defined(_MSC_VER) && defined(_WIN64)
+	#define XBOX_PTR32 __ptr32
+	#else
+	#define XBOX_PTR32
+	#endif
+
+	template<typename T>
+	using ptr_xt = T* XBOX_PTR32;
+
 	// ******************************************************************
 	// * Calling conventions
 	// ******************************************************************
@@ -83,33 +95,39 @@ namespace xbox
 	// ******************************************************************
 	// * Pointer types
 	// ******************************************************************
-	typedef char_xt *PCHAR;
-	typedef char_xt *PSZ;
-	typedef const char_xt *PCSZ;
-	typedef byte_xt *PBYTE;
-	typedef boolean_xt *PBOOLEAN;
-	typedef uchar_xt *PUCHAR;
-	typedef ushort_xt *PUSHORT;
-	typedef uint_xt *PUINT;
-	typedef ulong_xt *PULONG;
-	typedef dword_xt *PDWORD, *LPDWORD;
-	typedef long_xt *PLONG;
-	typedef int_ptr_xt *PINT_PTR;
-	typedef void_xt *PVOID, *LPVOID;
-	typedef void_xt *HANDLE;
-	typedef HANDLE *PHANDLE;
-	typedef size_xt *PSIZE_T;
-	typedef access_mask_xt *PACCESS_MASK;
-	typedef longlong_xt *PLONGLONG;
-	typedef quad_xt *PQUAD;
+	using PCHAR = ptr_xt<char_xt>;
+	using PSZ = ptr_xt<char_xt>;
+	using PCSZ = ptr_xt<const char_xt>;
+	using PBYTE = ptr_xt<byte_xt>;
+	using PBOOLEAN = ptr_xt<boolean_xt>;
+	using PUCHAR = ptr_xt<uchar_xt>;
+	using PUSHORT = ptr_xt<ushort_xt>;
+	using PUINT = ptr_xt<uint_xt>;
+	using PULONG = ptr_xt<ulong_xt>;
+	using PDWORD = ptr_xt<dword_xt>;
+	using LPDWORD = ptr_xt<dword_xt>;
+	using PLONG = ptr_xt<long_xt>;
+	using PINT_PTR = ptr_xt<int_ptr_xt>;
+	using PVOID = ptr_xt<void_xt>;
+	using LPVOID = ptr_xt<void_xt>;
+	using HANDLE = ptr_xt<void_xt>;
+	using PHANDLE = ptr_xt<HANDLE>;
+	using PSIZE_T = ptr_xt<size_xt>;
+	using PACCESS_MASK = ptr_xt<access_mask_xt>;
+	using PLONGLONG = ptr_xt<longlong_xt>;
+	using PQUAD = ptr_xt<quad_xt>;
 
 	// ******************************************************************
 	// ANSI (Multi-byte Character) types
 	// ******************************************************************
-	typedef char_xt *PCHAR, *LPCH, *PCH;
-	typedef const char_xt *LPCCH, *PCCH;
-	typedef wchar_xt *LPWSTR, *PWSTR;
-	typedef /*_Null_terminated_*/ const wchar_xt *LPCWSTR, *PCWSTR;
+	using LPCH = ptr_xt<char_xt>;
+	using PCH = ptr_xt<char_xt>;
+	using LPCCH = ptr_xt<const char_xt>;
+	using PCCH = ptr_xt<const char_xt>;
+	using LPWSTR = ptr_xt<wchar_xt>;
+	using PWSTR = ptr_xt<wchar_xt>;
+	using LPCWSTR = ptr_xt<const wchar_xt>;
+	using PCWSTR = ptr_xt<const wchar_xt>;
 
 	// ******************************************************************
 	// Misc

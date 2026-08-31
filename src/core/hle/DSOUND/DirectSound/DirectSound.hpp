@@ -30,6 +30,7 @@
 #include "core\hle\XAPI\Xapi.h" // For EMUPATCH
 #include "core\hle\DSOUND\XbDSoundTypes.h"
 #include "core\hle\DSOUND\common\XbInternalStruct.hpp"
+#include "core/hle/DSOUND/DsoundHostTypes.h"
 
 typedef struct IDirectSound3DListener8* LPDIRECTSOUND3DLISTENER8;
 typedef struct IDirectSound3DBuffer8* LPDIRECTSOUND3DBUFFER8;
@@ -46,7 +47,9 @@ void CxbxInitAudio();
 
 namespace xbox {
 
+#if !defined(CXBXR_UWP)
 #include <dsound.h> // TODO: FIXME after global namespace xbox issue is resolved.
+#endif
 
 // ******************************************************************
 // * X_CDirectSound
@@ -71,6 +74,15 @@ typedef struct _DSoundBuffer_Lock {
     DWORD   dwLockFlags;
 } DSoundBuffer_Lock;
 
+typedef struct _HostDSoundBuffer_Lock {
+    ::LPVOID pLockPtr1;
+    DWORD    dwLockBytes1;
+    ::LPVOID pLockPtr2;
+    DWORD    dwLockBytes2;
+    DWORD    dwLockOffset;
+    DWORD    dwLockFlags;
+} HostDSoundBuffer_Lock;
+
 // ******************************************************************
 // * X_CDirectSoundBuffer
 // ******************************************************************
@@ -85,7 +97,9 @@ struct EmuDirectSoundBuffer
         PVOID                   pMpcxBuffer;
         LPDIRECTSOUNDBUFFER8    EmuDirectSoundBuffer8;
     };
-    LPVOID                  X_BufferCache;
+    // Host-owned decoded PCM cache. This must remain a native pointer on the
+    // x64 UWP host; guest addresses use xbox::PVOID explicitly elsewhere.
+    ::LPVOID                X_BufferCache;
     DSBUFFERDESC            EmuBufferDesc;
     /*LPVOID                  EmuLockPtr1;
     DWORD                   EmuLockBytes1;
@@ -103,7 +117,7 @@ struct EmuDirectSoundBuffer
     DWORD                   EmuRegionPlayStartOffset;
     DWORD                   EmuRegionPlayLength;
     DWORD                   X_BufferCacheSize;
-    DSoundBuffer_Lock       Host_lock;
+    HostDSoundBuffer_Lock   Host_lock;
     DSoundBuffer_Lock       X_lock;
     REFERENCE_TIME          Xb_rtPauseEx;
     REFERENCE_TIME          Xb_rtStopEx;
@@ -312,11 +326,11 @@ class X_CDirectSoundStream
         // cached data
         LPDIRECTSOUNDBUFFER8                    EmuDirectSoundBuffer8;
         LPDIRECTSOUND3DBUFFER8                  EmuDirectSound3DBuffer8;
-        PVOID                                   X_BufferCache; // Not really needed...
+        ::PVOID                                 X_BufferCache; // Host-owned decoded PCM cache.
         DSBUFFERDESC                            EmuBufferDesc;
-        PVOID                                   EmuLockPtr1;
+        ::PVOID                                 EmuLockPtr1;
         DWORD                                   EmuLockBytes1;
-        PVOID                                   EmuLockPtr2;
+        ::PVOID                                 EmuLockPtr2;
         DWORD                                   EmuLockBytes2;
         DWORD                                   EmuPlayFlags;
         DWORD                                   EmuFlags;

@@ -40,9 +40,8 @@
 
 #include "swizzle.h"
 
-#include "nv2a_debug.h" // For HWADDR_PRIx, NV2A_DPRINTF, NV2A_GL_DPRINTF, etc.
+#include "nv2a_debug.h" // For HWADDR_PRIx, NV2A_DPRINTF, NV2A_DPRINTF_IF, etc.
 #include "nv2a_regs.h" // For NV2A_MAX_TEXTURES, etc
-#include "core\\hle\\D3D8\\Rendering\\NV2A_PGRAPH_Helpers.h" // For NV2ASurfaceState
 
 
 typedef xbox::addr_xt hwaddr; // Compatibility; Cxbx uses xbox::addr_xt, xqemu and OpenXbox use hwaddr 
@@ -59,6 +58,31 @@ typedef uint32_t value_t; // Compatibility; Cxbx values are uint32_t (xqemu and 
 #define NV_PGRAPH_SIZE              (0x002000 / 4)
 #define NV_PCRTC_SIZE               (0x001000 / 4)
 #define NV_PRAMDAC_SIZE             (0x001000 / 4)
+
+// Byte sizes for each register block (used for GPU upload, memcpy, etc.)
+#define NV_PMC_REGS_BYTES           (NV_PMC_SIZE * sizeof(uint32_t))       // 4 KB
+#define NV_PFIFO_REGS_BYTES         (_NV_PFIFO_SIZE * sizeof(uint32_t))    // 8 KB
+#define NV_PVIDEO_REGS_BYTES        (NV_PVIDEO_SIZE * sizeof(uint32_t))    // 4 KB
+#define NV_PTIMER_REGS_BYTES        (NV_PTIMER_SIZE * sizeof(uint32_t))    // 4 KB
+#define NV_PFB_REGS_BYTES           (NV_PFB_SIZE * sizeof(uint32_t))       // 4 KB
+#define NV_PGRAPH_REGS_BYTES        (NV_PGRAPH_SIZE * sizeof(uint32_t))    // 8 KB
+#define NV_PCRTC_REGS_BYTES         (NV_PCRTC_SIZE * sizeof(uint32_t))     // 4 KB
+#define NV_PRAMDAC_REGS_BYTES       (NV_PRAMDAC_SIZE * sizeof(uint32_t))   // 4 KB
+
+// Flat MMIO backing storage: 16 MiB reserved, only engine block pages committed.
+// Block offsets mirror real NV2A MMIO layout (offset from NV2A base 0xFD000000).
+#define NV2A_MMIO_TOTAL_SIZE        0x01000000u  // 16 MiB
+#define NV2A_MMIO_OFF_PMC           0x000000u
+#define NV2A_MMIO_OFF_PFIFO         0x002000u
+#define NV2A_MMIO_OFF_PVIDEO        0x008000u
+#define NV2A_MMIO_OFF_PTIMER        0x009000u
+#define NV2A_MMIO_OFF_PFB           0x100000u
+#define NV2A_MMIO_OFF_PGRAPH        0x400000u
+#define NV2A_MMIO_OFF_PCRTC         0x600000u
+#define NV2A_MMIO_OFF_PRAMDAC       0x680000u
+
+// Global flat MMIO buffer pointer (allocated in CxbxReserveNV2AMemory)
+extern uint8_t* g_pNV2AMMIO;
 
 #define VSH_TOKEN_SIZE 4 // Compatibility; TODO : Move this to nv2a_vsh.h
 #define MAX(a,b) ((a)>(b) ? (a) : (b)) // Compatibility
@@ -109,8 +133,6 @@ static int ffs(int valu)
 #define CASE_16(v, step) CASE_8(v, step) : CASE_8(v + (step) * 8, step)
 #define CASE_32(v, step) CASE_16(v, step) : CASE_16(v + (step) * 16, step)
 #define CASE_64(v, step) CASE_32(v, step) : CASE_32(v + (step) * 32, step)
-#define CASE_128(v, step) CASE_64(v, step) : CASE_64(v + (step) * 64, step)
-#define CASE_256(v, step) CASE_128(v, step) : CASE_128(v + (step) * 128, step)
 
 // Non-power-of-two CASE statements
 #define CASE_3(v, step) CASE_2(v, step) : CASE_1(v + (step) * 2, step)
@@ -150,17 +172,8 @@ typedef struct VertexAttribute {
 	unsigned int count; /* number of components */
 	uint32_t stride;
 
-	bool needs_conversion;
-	uint8_t *converted_buffer;
-	unsigned int converted_elements;
-	unsigned int converted_size;
-	unsigned int converted_count;
-
 	float *inline_buffer;
-
-	int32_t gl_count;
-	int32_t gl_type;
-	int32_t gl_normalize;
+	float *inline_buffer_pool; // Persistent allocation reused across draws (avoids malloc/free per draw)
 } VertexAttribute;
 
 typedef struct Surface {
@@ -217,12 +230,60 @@ typedef struct PatchState {
 	int totalCoeffs;                // total float4 entries written
 } PatchState;
 
+// Dirty group indices for PGRAPHState::dirty[] array.
+// Indexed from NV097MethodEntry::dirty_group (0 = no dirty flag).
+enum NV2ADirtyGroup {
+	NV2A_DIRTY_NONE = 0,         // no dirty flag (must be 0 — table guard skips this)
+	NV2A_DIRTY_PGRAPH = 0,       // alias: any pg->regs[] write (set explicitly, not via table guard)
+	NV2A_DIRTY_PROGRAM,          // program_data[] was written
+	NV2A_DIRTY_SURFACE,          // surface configuration changed
+	NV2A_DIRTY_TEXTURE,          // texture state changed
+	NV2A_DIRTY_BLEND,            // blend / color mask state changed
+	NV2A_DIRTY_RASTERIZER,       // rasterizer state changed (cull, polygon, etc.)
+	NV2A_DIRTY_DEPTH_STENCIL,    // depth/stencil state changed
+	NV2A_DIRTY_SHADER,           // shader/combiner program changed
+	// --- Values above here (1–7) fit in the 3-bit dirty_group table field ---
+	NV2A_DIRTY_LIGHTING,         // ltctxa/ltctxb/ltc1/light write (not table-assignable, set in code)
+	NV2A_DIRTY_COUNT
+};
+
 typedef struct KelvinState {
 	xbox::addr_xt object_instance;
 } KelvinState;
 
+// NV2A Transform Engine ("Cheops") internal SRAM state.
+// These banks are NOT MMIO-mapped; accessed indirectly via pushbuffer
+// methods (auto-incrementing CHEOPS_OFFSET) or RDI debug interface.
+typedef struct CheopsState {
+	// XFPR: Transform Program RAM (136 × 128-bit instructions)
+	uint32_t xfpr[NV2A_MAX_TRANSFORM_PROGRAM_LENGTH][VSH_TOKEN_SIZE];
+
+	// XFCTX: Transform Context RAM (192 × float4) — vertex shader constants,
+	// matrices, viewport params, eye position, etc.
+	uint32_t xfctx[NV2A_VERTEXSHADER_CONSTANTS][4];
+	uint32_t xfctx_dirty[6]; // Bitmap: 192 bits across 6 words
+	uint32_t xfctx_generation; // Monotonic counter: incremented on every xfctx write
+
+	// LTCTXA: Lighting Context A (26 × float4) — fog, ambient, material color,
+	// per-light attenuation/spot params
+	uint32_t ltctxa[NV2A_LTCTXA_COUNT][4];
+	uint32_t ltctxa_dirty[1]; // Bitmap: 26 bits in 1 word
+
+	// LTCTXB: Lighting Context B (52 × float4) — per-light diffuse/specular/ambient colors
+	uint32_t ltctxb[NV2A_LTCTXB_COUNT][4];
+	uint32_t ltctxb_dirty[2]; // Bitmap: 52 bits across 2 words
+
+	// LTC1: Lighting Constants 1 (20 × float4) — light range, material power params
+	uint32_t ltc1[NV2A_LTC1_COUNT][4];
+	uint32_t ltc1_dirty[1]; // Bitmap: 20 bits in 1 word
+
+	// SET_TRANSFORM_DATA (0x1E80): input v0 register for LAUNCH_TRANSFORM_PROGRAM
+	uint32_t vertex_state_shader_v0[4];
+} CheopsState;
+
 typedef struct ContextSurfaces2DState {
 	xbox::addr_xt object_instance;
+	xbox::addr_xt dma_notifies; // Stored by NV097_SET_CONTEXT_DMA_NOTIFIES, to be used by ?? to trigger a notify when the blit finishes.
 	xbox::addr_xt dma_image_source;
 	xbox::addr_xt dma_image_dest;
 	unsigned int color_format;
@@ -238,6 +299,23 @@ typedef struct ImageBlitState {
 	unsigned int out_x, out_y;
 	unsigned int width, height;
 } ImageBlitState;
+
+// NV2A surface register state (decoded from PGRAPH MMIO).
+struct NV2ASurfaceState {
+	uint32_t colorOffset;     // Raw color surface offset (relative to dma_color context)
+	uint32_t zetaOffset;      // Raw zeta surface offset (relative to dma_zeta context)
+	uint32_t colorPitch;      // Color surface pitch (bytes per row)
+	uint32_t zetaPitch;       // Zeta surface pitch
+	uint32_t clipX, clipY;    // Surface clip origin
+	uint32_t clipWidth;       // Surface clip width
+	uint32_t clipHeight;      // Surface clip height
+	uint32_t antiAliasing;    // NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_* value
+	uint32_t colorFormat;     // Surface color format
+	uint32_t zetaFormat;      // Surface zeta format
+	uint32_t surfaceType;     // NV097_SET_SURFACE_FORMAT_TYPE_PITCH or _SWIZZLE
+	uint32_t logWidth;        // log2(base width) for swizzle surfaces
+	uint32_t logHeight;       // log2(base height) for swizzle surfaces
+};
 
 typedef struct PGRAPHState {
 	QemuMutex pgraph_lock;
@@ -259,7 +337,10 @@ typedef struct PGRAPHState {
 
 	xbox::addr_xt dma_semaphore;
 
-	xbox::addr_xt dma_a, dma_b; // PRAMIN offsets for DMA context A/B (texture/palette address resolution)
+	// Cached resolved DMA base addresses (recalculated when context methods fire).
+	// Indexed by dma_select boolean: [0] = context A, [1] = context B.
+	uint32_t dma_base[2];        // Texture/palette DMA base
+	uint32_t dma_vertex_base[2]; // Vertex DMA base
 
 	xbox::addr_xt dma_report;
 	unsigned int zpass_pixel_count_enable;
@@ -270,28 +351,24 @@ typedef struct PGRAPHState {
 
 	uint32_t clear_surface_flags; // NV097_CLEAR_SURFACE parameter (Z/STENCIL/COLOR mask)
 
-	uint32_t program_data[NV2A_MAX_TRANSFORM_PROGRAM_LENGTH][VSH_TOKEN_SIZE]; // XFPR RAM mirror: NV2A Transform Program RAM (on-chip XF SRAM, 136 × 92-bit instructions in 128-bit containers)
-	bool program_data_dirty; // Set when any program_data slot is written; cleared after re-parse
+	// NV2A Transform Engine ("Cheops") — internal SRAM banks
+	CheopsState xf;
 
-	uint32_t vertex_state_shader_v0[4]; // NV097_SET_TRANSFORM_DATA (0x1E80): input v0 for LAUNCH_TRANSFORM_PROGRAM
+	// Dirty generation counters indexed by NV2ADirtyGroup.  Bumped by
+	// nv097_dispatch_method and PGRAPH switch handlers; each consumer
+	// independently tracks its own "last seen" value per group.
+	uint32_t dirty[NV2A_DIRTY_COUNT];
 
-	uint32_t vsh_constants[NV2A_VERTEXSHADER_CONSTANTS][4]; // XFCTX RAM mirror: NV2A Transform Context RAM (on-chip XF SRAM, 192 × float4)
-	bool vsh_constants_dirty[NV2A_VERTEXSHADER_CONSTANTS];
-	uint32_t vsh_constants_generation; // Bumped when any vsh_constant is written; consumer skips dirty scan if unchanged
-
-	/* lighting constant arrays */
-	uint32_t ltctxa[NV2A_LTCTXA_COUNT][4];
-	bool ltctxa_dirty[NV2A_LTCTXA_COUNT];
-	uint32_t ltctxb[NV2A_LTCTXB_COUNT][4];
-	bool ltctxb_dirty[NV2A_LTCTXB_COUNT];
-	uint32_t ltc1[NV2A_LTC1_COUNT][4];
-	bool ltc1_dirty[NV2A_LTC1_COUNT];
-
-	// should figure out where these are in lighting context
-	float light_infinite_half_vector[NV2A_MAX_LIGHTS][3];
-	float light_infinite_direction[NV2A_MAX_LIGHTS][3];
-	float light_local_position[NV2A_MAX_LIGHTS][3];
-	float light_local_attenuation[NV2A_MAX_LIGHTS][3];
+	// Light geometry — SRAM bank unknown (xemu: "should figure out where
+	// these are in lighting context").  Packed contiguously for data-driven
+	// dispatch via NV097_TARGET_LIGHT.  Per-light: 12 floats (48 bytes).
+	struct LightGeometry {
+		float infinite_half_vector[3];
+		float infinite_direction[3];
+		float local_position[3];
+		float local_attenuation[3];
+	} light[NV2A_MAX_LIGHTS];
+	static_assert(sizeof(LightGeometry) == 12 * sizeof(float), "LightGeometry must be 48 bytes");
 
 	float point_params[8]; // NV097_SET_POINT_PARAMS attenuation coefficients
 	float line_width;      // NV097_SET_LINE_WIDTH (float, pixels)
@@ -308,18 +385,17 @@ typedef struct PGRAPHState {
 
 	unsigned int draw_arrays_length;
 	unsigned int draw_arrays_max_count;
+	bool draw_arrays_prevent_connect;  // Don't merge adjacent entries across bracket boundaries
 
-	/* FIXME: Unknown size, possibly endless, 1000 will do for now */
-	int32_t gl_draw_arrays_start[1000];
-	int32_t gl_draw_arrays_count[1000];
+	int32_t draw_arrays_start[1250];
+	int32_t draw_arrays_count[1250];
 
 	// Hardware tessellation state
 	PatchState patch;
 
 	bool texture_matrix_enable[NV2A_MAX_TEXTURES]; // NV097_SET_TEXTURE_MATRIX_ENABLE per stage
 
-	uint32_t regs[NV_PGRAPH_SIZE]; // TODO : union
-	uint32_t regs_generation; // bumped on any regs[] write (for GPU upload skip)
+	uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PGRAPH
 } PGRAPHState;
 
 typedef struct OverlayState {
@@ -377,16 +453,16 @@ typedef struct NV2AState {
     struct {
         uint32_t pending_interrupts;
         uint32_t enabled_interrupts;
-		uint32_t regs[NV_PMC_SIZE]; // Not in xqemu/openxbox? TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PMC
     } pmc;
 
     struct {
         uint32_t pending_interrupts;
         uint32_t enabled_interrupts;
-		uint32_t regs[_NV_PFIFO_SIZE]; // TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PFIFO
 		QemuMutex pfifo_lock;
 		std::thread puller_thread;
-		QemuCond puller_cond;
+		HANDLE puller_event;  // Auto-reset event to wake the puller thread
 		std::thread pusher_thread;
 		QemuCond pusher_cond;
 		// Flush synchronization: HLE thread signals flush_requested, then
@@ -401,7 +477,7 @@ typedef struct NV2AState {
 		uint32_t enabled_interrupts;
 		//QemuCond interrupt_cond; // pvideo.interrupt_cond not used (yet)
 		OverlayState overlays[2]; // NV2A supports 2 video overlays
-		uint32_t regs[NV_PVIDEO_SIZE]; // TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PVIDEO
     } pvideo;
 
     struct {
@@ -410,11 +486,11 @@ typedef struct NV2AState {
         uint32_t numerator;
         uint32_t denominator;
         uint32_t alarm_time;
-		uint32_t regs[NV_PTIMER_SIZE]; // Not in xqemu/openxbox? TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PTIMER
     } ptimer;
 
     struct {
-		uint32_t regs[NV_PFB_SIZE]; // TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PFB
     } pfb;
 
     struct PGRAPHState pgraph;
@@ -424,7 +500,8 @@ typedef struct NV2AState {
         uint32_t enabled_interrupts;
         hwaddr start;
         uint32_t vblank_count; // Incremented each VBlank; bit 0 determines interlace field (even/odd)
-		uint32_t regs[NV_PCRTC_SIZE]; // Not in xqemu/openxbox? TODO : union
+        uint32_t last_present_vblank; // VBlank count at last present (prevents double-present)
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PCRTC
     } pcrtc;
 
     struct {
@@ -432,7 +509,7 @@ typedef struct NV2AState {
         uint64_t core_clock_freq;
         uint32_t memory_clock_coeff;
         uint32_t video_clock_coeff;
-		uint32_t regs[NV_PRAMDAC_SIZE]; // Not in xqemu/openxbox? TODO : union
+		uint32_t* regs; // Backed by g_pNV2AMMIO + NV2A_MMIO_OFF_PRAMDAC
     } pramdac;
 
 	// PRMDIO: VGA DAC palette (gamma LUT)
@@ -447,7 +524,19 @@ typedef struct NV2AState {
 	struct {
 		uint8_t cr_index;
 		uint8_t cr[256]; /* CRT registers */
+		uint8_t ar_index;
+		uint8_t ar[0x15]; /* Attribute Controller registers (VGA_ATT_C) */
+		bool    ar_flip_flop;  /* false=index, true=data */
 	} prmcio; // Not in xqemu/openxbox?
+
+	// PRMVIO: VGA Sequencer and Graphics Controller
+	struct {
+		uint8_t seq_index;
+		uint8_t seq[256];   /* Sequencer registers (VGA_SEQ_C used) */
+		uint8_t gfx_index;
+		uint8_t gfx[256];   /* Graphics Controller registers (VGA_GFX_C used) */
+		uint8_t misc_output; /* Misc Output Register */
+	} prmvio;
 } NV2AState;
 
 typedef value_t(*read_func)(NV2AState *d, hwaddr addr); //, unsigned int size);
@@ -472,5 +561,9 @@ typedef struct {
 	DWORD Ignored2[0x7ED];
 } Nv2AControlDma;
 #endif
+
+// Include PGRAPH helpers at the end so inline functions have access to full struct definitions.
+// Safe with pragma once: NV2A_PGRAPH_Helpers.h includes nv2a_int.h which will be a no-op.
+#include "core\\hle\\D3D8\\Rendering\\NV2A_PGRAPH_Helpers.h"
 
 #endif

@@ -34,6 +34,7 @@ extern void CxbxrKrnlSuspendThreads();
 
 #include "cxbxr.hpp"
 
+#include "CxbxEmbedRuntime.h"
 #include "EmuShared.h"
 #include "Settings.hpp"
 #include "Logging.h"
@@ -89,9 +90,9 @@ bool HandleFirstLaunch()
 	return true;
 }
 
-[[noreturn]] void CxbxrShutDown(bool is_reboot)
+void CxbxrShutDown(bool is_reboot)
 {
-	if (!is_reboot) {
+	if (!is_reboot && g_EmuShared != nullptr) {
 		// Clear all kernel boot flags. These (together with the shared memory) persist until Cxbx-Reloaded is closed otherwise.
 		int BootFlags = 0;
 		g_EmuShared->SetBootFlags(&BootFlags);
@@ -127,37 +128,52 @@ bool HandleFirstLaunch()
 
 	CxbxrUnlockFilePath();
 
+	#if !defined(CXBXR_UWP)
 	if (CxbxKrnl_hEmuParent != NULL && !is_reboot) {
 		SendMessage(CxbxKrnl_hEmuParent, WM_PARENTNOTIFY, WM_DESTROY, 0);
 	}
+	#endif
 #endif
 
 	EmuShared::Cleanup();
 
-	TerminateProcess(GetCurrentProcess(), 0);
+	// Desktop Cxbx historically relied on process termination to tear down
+	// guest threads. An embedded core must return ownership to its host instead.
+	#if !defined(CXBXR_UWP)
+	if (!CxbxEmbedRuntimeIsActive()) {
+		TerminateProcess(GetCurrentProcess(), 0);
+	}
+	#endif
 }
 
 [[noreturn]] void CxbxrAbortEx(CXBXR_MODULE cxbxr_module, const char* szErrorMessage, ...)
 {
+	char szBuffer2[1024]{};
+	if (szErrorMessage != NULL) {
+		va_list argp;
+		va_start(argp, szErrorMessage);
+		vsnprintf(szBuffer2, sizeof(szBuffer2), szErrorMessage, argp);
+		va_end(argp);
+	}
+
+	if (CxbxEmbedRuntimeIsActive()) {
+		CxbxEmbedRuntimeReportLog(cxbxr_module, LOG_LEVEL::FATAL, szBuffer2);
+		CxbxEmbedRuntimeReportError(CXBX_EMBED_LAUNCH_FAILED, szBuffer2);
+		CxbxEmbedRuntimeRequestStop();
+		throw CxbxEmbeddedAbort(szBuffer2);
+	}
+
 	// print out error message (if exists)
 	if (szErrorMessage != NULL)
 	{
-		char szBuffer2[1024];
-		va_list argp;
-
-		va_start(argp, szErrorMessage);
-		vsprintf(szBuffer2, szErrorMessage, argp);
-		va_end(argp);
-
 		(void)PopupCustomEx(nullptr, cxbxr_module, LOG_LEVEL::FATAL, PopupIcon::Error, PopupButtons::Ok, PopupReturn::Ok, "Received Fatal Message:\n\n* %s\n", szBuffer2); // Will also EmuLogEx
 	}
 
 	EmuLogInit(LOG_LEVEL::INFO, "MAIN: Terminating Process");
-
-#ifndef CXBXR_UWP
 	fflush(stdout);
 
-	// cleanup debug output
+	// cleanup debug output (desktop console only)
+#if !defined(CXBXR_UWP)
 	{
 		FreeConsole();
 
@@ -169,4 +185,8 @@ bool HandleFirstLaunch()
 #endif
 
 	CxbxrShutDown();
+#if defined(CXBXR_UWP)
+	// A DLL hosted by an app container must never terminate its process.
+	throw CxbxEmbeddedAbort(szBuffer2);
+#endif
 }

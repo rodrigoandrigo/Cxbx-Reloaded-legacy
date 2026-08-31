@@ -1,0 +1,51 @@
+<Page
+    x:Class="cxbx_UWP_Host.DirectXPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:cxbx_UWP_Host"
+    Background="#101318">
+
+    <Grid>
+        <SwapChainPanel x:Name="swapChainPanel" />
+
+        <Border x:Name="controlPanel"
+                VerticalAlignment="Top"
+                Margin="24"
+                Padding="18"
+                CornerRadius="8"
+                Background="#D920252D">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="Cxbx-Reloaded UWP"
+                           FontSize="24"
+                           FontWeight="SemiBold" />
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,14,0,10">
+                    <Button x:Name="selectTitleButton" Content="Selecionar XBE"
+                            Click="SelectTitle_Click" Margin="0,0,10,0" />
+                    <Button x:Name="startButton" Content="Iniciar"
+                            Click="Start_Click" IsEnabled="False" Margin="0,0,10,0" />
+                    <Button x:Name="stopButton" Content="Parar"
+                            Click="Stop_Click" IsEnabled="False" />
+                </StackPanel>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="titleText" Text="Nenhum título selecionado"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="statusText" Text="Pronto"
+                               Margin="0,4,0,0" Foreground="#FF8BD5FF" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border VerticalAlignment="Bottom" Margin="24" Padding="12"
+                MaxHeight="190" Background="#C0000000" CornerRadius="6">
+            <ScrollViewer x:Name="logScroller" VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="logText" FontFamily="Consolas" FontSize="12"
+                           TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Page>

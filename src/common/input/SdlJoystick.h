@@ -29,7 +29,11 @@
 #define SDL_H_
 
 #include "InputDevice.h"
+#if defined(CXBXR_UWP)
+#include <SDL3/SDL_haptic.h>
+#else
 #include <SDL_haptic.h>
+#endif
 #include <thread>
 
 
@@ -55,7 +59,7 @@ namespace Sdl
 	// shutdown SDL
 	void DeInit(std::thread& Thr);
 	// open the sdl joystick with the specified index
-	void OpenSdlDevice(const int Index);
+	void OpenSdlDevice(const SDL_JoystickID device_id);
 	// close the sdl joystick with the specified index
 	void CloseSdlDevice(const int Index);
 	// refresh the device list in response to a refresh command from the input GUI
@@ -64,7 +68,7 @@ namespace Sdl
 	class SdlJoystick : public InputDevice
 	{
 	public:
-		SdlJoystick(SDL_Joystick* const Joystick, const int Index);
+	SdlJoystick(SDL_Joystick* const Joystick, const SDL_JoystickID device_id);
 		~SdlJoystick();
 		// retrieves the name of the device
 		std::string GetDeviceName() const override;

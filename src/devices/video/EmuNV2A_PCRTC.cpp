@@ -36,6 +36,10 @@
 // Read Vertical Display End (visible scanlines) from VGA CRT registers.
 // Returns the number of visible lines (e.g. 480 for NTSC, 576 for PAL).
 // This is the same value GetFrameHeight() computes, but kept local to PCRTC.
+
+// Needed for protecting VBlank enable when GPU ISR is connected
+#include "core\kernel\exports\EmuKrnl.h"
+
 static unsigned int pcrtc_get_visible_lines(NV2AState *d)
 {
 	unsigned int vde = ((unsigned int)d->prmcio.cr[NV_CIO_CR_VDE_INDEX])
@@ -118,11 +122,10 @@ DEVICE_READ32(PCRTC)
 			totalLines = 525;
 		}
 		unsigned int refreshRate = pcrtc_get_refresh_rate(d, totalLines);
-		LARGE_INTEGER freq, now;
-		QueryPerformanceFrequency(&freq);
+		LARGE_INTEGER now;
 		QueryPerformanceCounter(&now);
-		// Frame period in QPC ticks
-		LONGLONG frameTicks = freq.QuadPart / refreshRate;
+		// Frame period in QPC ticks (HostQPCFrequency from Timer.h, set once in timer_init)
+		LONGLONG frameTicks = HostQPCFrequency / refreshRate;
 		// Compute position relative to last VBlank (instead of free-running QPC modulo)
 		int64_t lastVBlankQPC = d->vblank_last_qpc.load(std::memory_order_acquire);
 		LONGLONG posInFrame;
@@ -164,6 +167,12 @@ DEVICE_WRITE32(PCRTC)
 		break;
 	case NV_PCRTC_INTR_EN_0:
 		d->pcrtc.enabled_interrupts = value;
+		// Safety net: prevent VBlank from being disabled once the game's ISR is
+		// connected. The D3D runtime may briefly clear this during init, but
+		// disabling VBlank would stall the DPC loop. Re-assert to be safe.
+		if (EmuInterruptList[3] && EmuInterruptList[3]->Connected) {
+			d->pcrtc.enabled_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+		}
 		update_irq(d);
 		break;
 	case NV_PCRTC_START:

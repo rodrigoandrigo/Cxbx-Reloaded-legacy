@@ -12,7 +12,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -52,9 +52,14 @@ private:
 extern class ExceptionManager* g_ExceptionManager;
 
 // print call stack trace
-#ifdef _DEBUG
 void EmuPrintStackTrace(PCONTEXT ContextRecord);
-#endif
+
+// Dump stack traces for all threads (hang diagnostics)
+void EmuDumpAllThreadStacks(const char* reason);
+
+// Present stall detection
+void EmuPresentTick();          // Call after every successful present
+void EmuCheckPresentStall(uint64_t stallThresholdMs = 5000);
 
 // global flags specifying current emulation state
 extern volatile thread_local bool g_bEmuException;

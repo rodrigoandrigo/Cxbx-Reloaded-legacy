@@ -76,8 +76,8 @@ uint32_t CxbxPageTrackerFlushToGPU();
 // Check if any pages are CPU-dirty (quick early-out for draw path).
 bool CxbxPageTrackerHasDirtyPages();
 
-// Notify frame boundary — allows the next flush to use MAP_WRITE_DISCARD
-// for efficient full-buffer upload. Must be called from CxbxPresent().
+// Notify frame boundary — resets the once-per-frame flush gate.
+// Must be called from CxbxPresent().
 void CxbxPageTrackerOnPresent();
 
 // ******************************************************************
@@ -96,7 +96,7 @@ void CxbxPageTrackerMarkGPUDirty(uint32_t startOffset, uint32_t size);
 struct ID3D11Texture2D;
 void CxbxPageTrackerRegisterRT(uint32_t startOffset, uint32_t pitch,
 	uint32_t width, uint32_t height, uint32_t bpp,
-	ID3D11Texture2D* pTexture);
+	uint32_t surfaceType, ID3D11Texture2D* pTexture);
 
 // Lock/unlock the D3D11 context for the render path (puller thread).
 // The readback VEH uses TryEnter — if the puller holds the lock, readback
@@ -107,6 +107,13 @@ void CxbxPageTrackerUnlockD3D11Context();
 // Check if a specific contiguous page is GPU-dirty.
 // Used by CPU read paths to trigger readback before accessing the data.
 bool CxbxPageTrackerIsGPUDirty(uint32_t pageIndex);
+
+// Flush GPU-dirty pages that overlap a contiguous memory range to the GPU mirror.
+// When a vertex buffer aliases render target memory, the D3D11 RT content must be
+// read back to Xbox RAM and then uploaded to the GPU mirror buffer before the draw.
+// Called from the vertex fetch draw path for each active stream's address range.
+// Returns true if any pages were flushed.
+bool CxbxPageTrackerFlushGPUDirtyToMirror(uint32_t startOffset, uint32_t size);
 
 // Clear GPU-dirty flags for a range after readback completes.
 void CxbxPageTrackerClearGPUDirty(uint32_t startOffset, uint32_t size);
@@ -132,6 +139,25 @@ ID3D11ShaderResourceView* CxbxPageTrackerGetMirrorSRV();
 // conversion for attributes whose byte offset is dword-aligned.
 ID3D11ShaderResourceView* CxbxPageTrackerGetMirrorSRV_SNORM16x2(); // R16G16_SNORM (t2)
 ID3D11ShaderResourceView* CxbxPageTrackerGetMirrorSRV_UNORM8x4();  // R8G8B8A8_UNORM (t3)
+
+// Get the UAV for the 64 MiB contiguous mirror RWByteAddressBuffer (for CS use).
+struct ID3D11UnorderedAccessView;
+ID3D11UnorderedAccessView* CxbxPageTrackerGetMirrorUAV();
+
+// Upload PGRAPH register block to the appended region of the mirror buffer.
+// Called when pg->dirty[NV2A_DIRTY_PGRAPH] changes. pRegs points to pg->regs[],
+// size is typically 8192 bytes (2048 × uint32).
+void CxbxPageTrackerUploadPGRAPH(const void* pRegs, uint32_t size);
+
+// Upload PFB register block to the appended region of the mirror buffer.
+// Called on PFB tile register writes. pRegs points to d->pfb.regs[],
+// size is typically 4096 bytes (1024 × uint32).
+void CxbxPageTrackerUploadPFB(const void* pRegs, uint32_t size);
+
+// Upload PVIDEO register block to the appended region of the mirror buffer.
+// Called alongside PGRAPH upload. pRegs points to d->pvideo.regs[],
+// size is typically 4096 bytes (1024 × uint32).
+void CxbxPageTrackerUploadPVIDEO(const void* pRegs, uint32_t size);
 
 // ******************************************************************
 // * Texture-dirty tracking (dirty-page-gated texture update)

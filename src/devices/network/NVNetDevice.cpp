@@ -44,6 +44,7 @@
 #include <Iphlpapi.h>
 #include <pcap.h>
 #include <exception>
+#include <vector>
 
 #define IOPORT_SIZE 0x8
 #define MMIO_SIZE   0x400
@@ -511,6 +512,7 @@ void NVNetDevice::Init()
 
 	m_DeviceId = 0x01C3;
 	m_VendorId = PCI_VENDOR_ID_NVIDIA;
+	m_RevisionAndClassCode = 0x020000A1; // Ethernet controller, rev A1
 
 	memset(NvNetState.regs, 0, sizeof(NvNetState.regs));
 	NvNetState.rx_ring_index = 0;
@@ -529,8 +531,9 @@ void NVNetDevice::Init()
 		return;
 	};
 
-	PCAPInit();
-	NVNetRecvThread = std::thread(NVNetRecvThreadProc);
+	if (PCAPInit()) {
+		NVNetRecvThread = std::thread(NVNetRecvThreadProc);
+	}
 }
 
 void NVNetDevice::Reset()
@@ -539,6 +542,36 @@ void NVNetDevice::Reset()
 
 bool NVNetDevice::GetMacAddress(std::string adapterName, void* pMAC)
 {
+#if defined(CXBXR_UWP)
+	ULONG bufferLength = 0;
+	DWORD status = GetAdaptersAddresses(AF_UNSPEC,
+		GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+		GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &bufferLength);
+	if (status != ERROR_BUFFER_OVERFLOW || bufferLength == 0) {
+		return false;
+	}
+
+	std::vector<unsigned char> buffer(bufferLength);
+	auto* addresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+	status = GetAdaptersAddresses(AF_UNSPEC,
+		GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+		GAA_FLAG_SKIP_DNS_SERVER, nullptr, addresses, &bufferLength);
+	if (status != NO_ERROR) {
+		return false;
+	}
+
+	for (auto* address = addresses; address; address = address->Next) {
+		if (address->PhysicalAddressLength < 6) {
+			continue;
+		}
+		if (adapterName.empty() ||
+			(address->AdapterName && adapterName == address->AdapterName)) {
+			memcpy(pMAC, address->PhysicalAddress, 6);
+			return true;
+		}
+	}
+	return false;
+#else
 	// AdapterInfo is too large to be allocated on the stack, and will cause a crash in debug builds when _chkstk detects it
 	auto adapterInfo = new IP_ADAPTER_INFO[128];
 	PIP_ADAPTER_INFO pAdapterInfo = (PIP_ADAPTER_INFO)adapterInfo;
@@ -565,6 +598,7 @@ bool NVNetDevice::GetMacAddress(std::string adapterName, void* pMAC)
 
 	delete[] adapterInfo;
 	return false;
+#endif
 }
 
 uint32_t NVNetDevice::IORead(int barIndex, uint32_t port, unsigned size)
@@ -616,6 +650,11 @@ void NVNetDevice::MMIOWrite(int barIndex, uint32_t addr, uint32_t value, unsigne
 
 bool NVNetDevice::PCAPInit()
 {
+#if defined(CXBXR_UWP)
+	EmuLog(LOG_LEVEL::WARNING,
+		"Raw PCAP networking is unavailable in the UWP app container; networking remains disabled");
+	return false;
+#else
 	char errorBuffer[PCAP_ERRBUF_SIZE];
 
 	// Open the desired network adapter
@@ -648,6 +687,7 @@ bool NVNetDevice::PCAPInit()
 
 	m_PCAPRunning = true;
 	return true;
+#endif
 }
 
 void PrintRawPayload(void* buffer, size_t length)
@@ -686,6 +726,11 @@ void PrintPacket(void* buffer, size_t length)
 
 bool NVNetDevice::PCAPSend(void* packet, size_t length)
 {
+#if defined(CXBXR_UWP)
+	(void)packet;
+	(void)length;
+	return false;
+#else
 	if (!m_PCAPRunning) {
 		return false;
 	}
@@ -705,10 +750,16 @@ bool NVNetDevice::PCAPSend(void* packet, size_t length)
 	}
 
 	return pcap_sendpacket((pcap_t*)m_AdapterHandle, (uint8_t*)packet, length);
+#endif
 }
 
 size_t NVNetDevice::PCAPReceive(void* packet, size_t max_length)
 {
+#if defined(CXBXR_UWP)
+	(void)packet;
+	(void)max_length;
+	return static_cast<size_t>(-1);
+#else
 	if (!m_PCAPRunning) {
 		return -1;
 	}
@@ -728,4 +779,5 @@ size_t NVNetDevice::PCAPReceive(void* packet, size_t max_length)
 	}
 
 	return -1;
+#endif
 }

@@ -1,8 +1,0 @@
-x64/
-ARM64/
-Win32/
-AppPackages/
-*.user
-Cxbx-R-uwp/Generated Files/*.hpp
-Cxbx-R-uwp/Generated Files/*.xbf
-Cxbx-R-uwp/Generated Files/*.xaml

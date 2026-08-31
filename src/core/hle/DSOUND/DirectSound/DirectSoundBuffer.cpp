@@ -1257,7 +1257,8 @@ xbox::hresult_xt WINAPI xbox::EMUPATCH(IDirectSoundBuffer_SetNotificationPositio
 
     if (pThis) {
         if (pThis->EmuDirectSoundBuffer8) {
-            hRet = pThis->EmuDirectSoundBuffer8->QueryInterface(IID_IDirectSoundNotify8, (LPVOID*)&pNotify);
+            hRet = pThis->EmuDirectSoundBuffer8->QueryInterface(IID_IDirectSoundNotify8,
+                reinterpret_cast<::LPVOID*>(&pNotify));
             if (hRet == DS_OK) {
                 hRet = pNotify->SetNotificationPositions(dwNotifyCount, paNotifies);
                 if (hRet != DS_OK) {

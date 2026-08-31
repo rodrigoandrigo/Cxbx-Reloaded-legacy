@@ -39,9 +39,33 @@ char szFilePath_EEPROM_bin[MAX_PATH] = { 0 };
 std::string g_DataFilePath;
 std::string g_DiskBasePath;
 std::string g_MediaBoardBasePath;
-static std::string g_BrokeredDataPath;
-static std::string g_BrokeredGamePath;
 std::string g_MuBasePath;
+
+#if defined(CXBXR_UWP)
+static std::string Utf8FromWide(const wchar_t* value)
+{
+	const int length = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+	if (length <= 0) {
+		return {};
+	}
+	std::string result(static_cast<size_t>(length), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), length, nullptr, nullptr);
+	result.resize(static_cast<size_t>(length - 1));
+	return result;
+}
+
+static std::wstring WideFromUtf8(const std::string& value)
+{
+	const int length = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+	if (length <= 0) {
+		return {};
+	}
+	std::wstring result(static_cast<size_t>(length), L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), length);
+	result.resize(static_cast<size_t>(length - 1));
+	return result;
+}
+#endif
 
 //TODO: Possible move CxbxResolveHostToFullPath inline function someplace else if become useful elsewhere.
 // Let filesystem library clean it up for us, including resolve host's symbolic link path.
@@ -73,10 +97,7 @@ void CxbxResolveHostToFullPath(std::string& file_path, std::string_view finish_e
 // NOTE: Do NOT modify g_<custom>BasePath variables after this call!
 void CxbxrInitFilePaths()
 {
-	if (!g_BrokeredDataPath.empty()) {
-		g_DataFilePath = g_BrokeredDataPath;
-	}
-	else if (g_Settings) {
+	if (g_Settings) {
 		g_DataFilePath = g_Settings->GetDataLocation();
 	}
 	else {
@@ -85,17 +106,21 @@ void CxbxrInitFilePaths()
 		g_DataFilePath = dataLoc;
 	}
 
+	// For non-throwing version of std::filesystem functions, we need to pass
+	// in an std::error_code object to receive any error information instead of exceptions.
+	// This allows us to handle errors gracefully without crashing the program.
+	std::error_code ec;
 	// Make sure our data folder exists :
 	bool result = std::filesystem::exists(g_DataFilePath);
-	if (!result && !std::filesystem::create_directory(g_DataFilePath)) {
-		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded's data folder!", __func__);
+	if (!result && !std::filesystem::create_directory(g_DataFilePath, ec)) {
+		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded's data folder! Path='%s' ec=%d", __func__, g_DataFilePath.c_str(), ec.value());
 	}
 
 	// Make sure the EmuDisk folder exists
 	g_DiskBasePath = g_DataFilePath + "\\EmuDisk";
 	result = std::filesystem::exists(g_DiskBasePath);
-	if (!result && !std::filesystem::create_directory(g_DiskBasePath)) {
-		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded EmuDisk folder!", __func__);
+	if (!result && !std::filesystem::create_directory(g_DiskBasePath, ec)) {
+		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded EmuDisk folder! Path='%s' ec=%d", __func__, g_DiskBasePath.c_str(), ec.value());
 	}
 	CxbxResolveHostToFullPath(g_DiskBasePath, "Cxbx-Reloaded's EmuDisk directory");
 	g_DiskBasePath = std::filesystem::path(g_DiskBasePath).append("").string();
@@ -103,7 +128,7 @@ void CxbxrInitFilePaths()
 	// Make sure the EmuDMu folder exists
 	g_MuBasePath = g_DataFilePath + "\\EmuMu";
 	result = std::filesystem::exists(g_MuBasePath);
-	if (!result && !std::filesystem::create_directory(g_MuBasePath)) {
+	if (!result && !std::filesystem::create_directory(g_MuBasePath, ec)) {
 		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded EmuMu folder!", __func__);
 	}
 	CxbxResolveHostToFullPath(g_MuBasePath, "Cxbx-Reloaded's EmuMu directory");
@@ -114,28 +139,20 @@ void CxbxrInitFilePaths()
 	// Make sure the EmuMediaBoard folder exists
 	g_MediaBoardBasePath = g_DataFilePath + "\\EmuMediaBoard";
 	result = std::filesystem::exists(g_MediaBoardBasePath);
-	if (!result && !std::filesystem::create_directory(g_MediaBoardBasePath)) {
+	if (!result && !std::filesystem::create_directory(g_MediaBoardBasePath, ec)) {
 		CxbxrAbort("%s : Couldn't create Cxbx-Reloaded EmuMediaBoard folder!", __func__);
 	}
 	CxbxResolveHostToFullPath(g_MediaBoardBasePath, "Cxbx-Reloaded's EmuMediaBoard directory");
 	g_MediaBoardBasePath = std::filesystem::path(g_MediaBoardBasePath).append("").string();
 
-	GetModuleFileName(GetModuleHandle(nullptr), szFilePath_CxbxReloaded_Exe, MAX_PATH);
-}
-
-void CxbxrSetBrokeredDataPath(const std::string& local_folder_path)
-{
-	g_BrokeredDataPath = local_folder_path;
-}
-
-void CxbxrSetBrokeredGamePath(const std::string& game_folder_path)
-{
-	g_BrokeredGamePath = game_folder_path;
-}
-
-const std::string& CxbxrGetBrokeredGamePath()
-{
-	return g_BrokeredGamePath;
+#if defined(CXBXR_UWP)
+	wchar_t modulePath[MAX_PATH]{};
+	GetModuleFileNameW(GetModuleHandle(nullptr), modulePath, MAX_PATH);
+	const std::string modulePathUtf8 = Utf8FromWide(modulePath);
+	strncpy_s(szFilePath_CxbxReloaded_Exe, modulePathUtf8.c_str(), _TRUNCATE);
+#else
+	GetModuleFileNameA(GetModuleHandle(nullptr), szFilePath_CxbxReloaded_Exe, MAX_PATH);
+#endif
 }
 
 // Loads a keys.bin file as generated by dump-xbox
@@ -185,7 +202,17 @@ bool CxbxrLockFilePath()
 
 	filePathHash << std::hex << hashValue;
 
-	hMapDataHash = CreateFileMapping(
+#if defined(CXBXR_UWP)
+	const std::wstring mappingName = WideFromUtf8(filePathHash.str());
+	hMapDataHash = CreateFileMappingFromApp(
+		INVALID_HANDLE_VALUE,      // Paging file
+		nullptr,                   // default security attributes
+		PAGE_READONLY,             // readonly access
+		/*Dummy size*/4,           // maximum size
+		mappingName.c_str()        // name of map object
+	);
+#else
+	hMapDataHash = CreateFileMappingA(
 		INVALID_HANDLE_VALUE,      // Paging file
 		nullptr,                   // default security attributes
 		PAGE_READONLY,             // readonly access
@@ -193,6 +220,7 @@ bool CxbxrLockFilePath()
 		/*Dummy size*/4,           // size: low 32 bits
 		filePathHash.str().c_str() // name of map object
 	);
+#endif
 
 	if (hMapDataHash == nullptr) {
 		return false;

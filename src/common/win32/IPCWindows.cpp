@@ -36,6 +36,12 @@
 #include "EmuShared.h"
 #include "common\Settings.hpp"
 #include "Logging.h"
+#if defined(CXBXR_UWP)
+#include "common/CxbxEmbedRuntime.h"
+#include "common/input/SdlJoystick.h"
+#include <atomic>
+namespace xbox { extern std::atomic_flag KeSystemTimeChanged; }
+#endif
 
 #ifdef CXBXR_EMU
 /*! parent window handle */
@@ -44,10 +50,7 @@ extern "C" HWND CxbxKrnl_hEmuParent = NULL;
 void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 {
 #if defined(CXBXR_UWP)
-	// GUI and kernel share one process. State is surfaced through the UWP
-	// session/log callbacks, so no window message is required.
-	(void)command;
-	(void)value;
+	CxbxEmbedRuntimeReportHostEvent(static_cast<CxbxEmbedHostEvent>(command), value);
 	return;
 #else
 	// Don't send if kernel process didn't receive hwnd from GUI process.
@@ -78,6 +81,14 @@ void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 			cmdParam = ID_GUI_STATUS_OVERLAY;
 			break;
 
+		case IPC_UPDATE_GUI::WINDOW_HANDLE:
+			cmdParam = ID_GUI_STATUS_EMU_HWND;
+			break;
+
+		case IPC_UPDATE_GUI::WINDOW_DESTROYED:
+			cmdParam = ID_GUI_STATUS_EMU_HWND_DESTROY;
+			break;
+
 		default:
 			cmdParam = 0;
 			break;
@@ -94,9 +105,22 @@ void ipc_send_gui_update(IPC_UPDATE_GUI command, const unsigned int value)
 void ipc_send_kernel_update(IPC_UPDATE_KERNEL command, const int value, const unsigned int hwnd)
 {
 #if defined(CXBXR_UWP)
-	(void)command;
-	(void)value;
-	(void)hwnd;
+	switch (command) {
+	case IPC_UPDATE_KERNEL::CONFIG_LOGGING_SYNC:
+		log_sync_config();
+		log_generate_active_filter_output(CXBXR_MODULE::CXBXR);
+		break;
+	case IPC_UPDATE_KERNEL::CONFIG_INPUT_SYNC: {
+		SDL_Event updateInputEvent{};
+		updateInputEvent.type = Sdl::UpdateInputEvent_t;
+		updateInputEvent.user.data1 = new int(value);
+		SDL_PushEvent(&updateInputEvent);
+		break;
+	}
+	case IPC_UPDATE_KERNEL::CONFIG_CHANGE_TIME:
+		xbox::KeSystemTimeChanged.test_and_set();
+		break;
+	}
 	return;
 #else
 	// Don't send if GUI process didn't create kernel process.

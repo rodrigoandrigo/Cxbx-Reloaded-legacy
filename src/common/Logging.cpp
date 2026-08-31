@@ -26,11 +26,9 @@
 // ******************************************************************
 
 #include <windows.h> // for PULONG
-#include <filesystem>
-#include <fstream>
-#include <mutex>
 
 #include "Logging.h"
+#include "CxbxEmbedRuntime.h"
 #include "common\Settings.hpp"
 #include "EmuShared.h"
 
@@ -110,15 +108,6 @@ const char* g_EnumModules2String[to_underlying(CXBXR_MODULE::MAX)] = {
 std::atomic_int g_CurrentLogLevel = to_underlying(LOG_LEVEL::INFO);
 std::atomic_bool g_CurrentLogPopupTestCase = true;
 static bool g_disablePopupMessages = false;
-static std::mutex g_logSinkMutex;
-static CxbxrLogCallback g_logCallback = nullptr;
-static void* g_logCallbackContext = nullptr;
-static std::filesystem::path g_logFilePath;
-#ifdef CXBXR_UWP
-static bool g_consoleLoggingEnabled = false;
-#else
-static bool g_consoleLoggingEnabled = true;
-#endif
 
 const char log_debug[] = "DEBUG: ";
 const char log_info[]  = "INFO : ";
@@ -130,6 +119,16 @@ const char log_unkwn[] = "???? : ";
 // Do not use EmuLogOutput function outside of this file.
 void EmuLogOutput(CXBXR_MODULE cxbxr_module, LOG_LEVEL level, const char *szWarningMessage, const va_list argp)
 {
+	if (CxbxEmbedRuntimeIsActive()) {
+		char message[4096];
+		va_list copy;
+		va_copy(copy, argp);
+		vsnprintf(message, sizeof(message), szWarningMessage, copy);
+		va_end(copy);
+		CxbxEmbedRuntimeReportLog(cxbxr_module, level, message);
+		return;
+	}
+
 	LOG_THREAD_INIT;
 
 	const char* level_str;
@@ -154,53 +153,14 @@ void EmuLogOutput(CXBXR_MODULE cxbxr_module, LOG_LEVEL level, const char *szWarn
 			break;
 	}
 
-	va_list format_args;
-	va_copy(format_args, argp);
-	const int size = std::vsnprintf(nullptr, 0, szWarningMessage, format_args);
-	va_end(format_args);
+	std::cout << _logThreadPrefix << level_str
+		<< g_EnumModules2String[to_underlying(cxbxr_module)];
 
-	std::string message = _logThreadPrefix + level_str + g_EnumModules2String[to_underlying(cxbxr_module)];
-	if (size > 0) {
-		const auto offset = message.size();
-		message.resize(offset + size + 1);
-		std::vsnprintf(message.data() + offset, size + 1, szWarningMessage, argp);
-		message.resize(offset + size);
-	}
-	message.push_back('\n');
+	vfprintf(stdout, szWarningMessage, argp);
 
-	std::lock_guard<std::mutex> lock(g_logSinkMutex);
-	if (g_logCallback) {
-		g_logCallback(message.c_str(), g_logCallbackContext);
-	}
-	if (!g_logFilePath.empty()) {
-		std::ofstream output(g_logFilePath, std::ios::out | std::ios::app | std::ios::binary);
-		if (output) {
-			output.write(message.data(), message.size());
-		}
-	}
-	if (g_consoleLoggingEnabled) {
-		std::fputs(message.c_str(), stdout);
-		std::fflush(stdout);
-	}
-}
+	fprintf(stdout, "\n");
 
-void CxbxrSetLogCallback(CxbxrLogCallback callback, void* context)
-{
-	std::lock_guard<std::mutex> lock(g_logSinkMutex);
-	g_logCallback = callback;
-	g_logCallbackContext = context;
-}
-
-void CxbxrSetLogFilePath(const std::filesystem::path& path)
-{
-	std::lock_guard<std::mutex> lock(g_logSinkMutex);
-	g_logFilePath = path;
-}
-
-void CxbxrSetConsoleLogging(bool enabled)
-{
-	std::lock_guard<std::mutex> lock(g_logSinkMutex);
-	g_consoleLoggingEnabled = enabled;
+	fflush(stdout);
 }
 inline void EmuLogOutputEx(const CXBXR_MODULE cxbxr_module, const LOG_LEVEL level, const char *szWarningMessage, ...)
 {
@@ -281,13 +241,28 @@ void log_set_config(int LogLevel, unsigned int* LoggedModules, bool LogPopupTest
 void log_generate_active_filter_output(const CXBXR_MODULE cxbxr_module)
 {
 	LOG_THREAD_INIT;
-	EmuLogOutputEx(cxbxr_module, LOG_LEVEL::INFO, "Current log level: %d", g_CurrentLogLevel.load());
+	std::string generic_output_str = _logThreadPrefix + log_info + g_EnumModules2String[to_underlying(cxbxr_module)];
+	if (CxbxEmbedRuntimeIsActive()) {
+		CxbxEmbedRuntimeReportLog(cxbxr_module, LOG_LEVEL::INFO,
+			(std::string("Current log level: ") + std::to_string(g_CurrentLogLevel.load())).c_str());
+		for (unsigned int index = to_underlying(CXBXR_MODULE::CXBXR); index < to_underlying(CXBXR_MODULE::MAX); index++) {
+			if (g_EnabledModules[index]) {
+				CxbxEmbedRuntimeReportLog(cxbxr_module, LOG_LEVEL::INFO,
+					(std::string("Active log filter: ") + g_EnumModules2String[index]).c_str());
+			}
+		}
+		return;
+	}
 
+	std::cout << generic_output_str << "Current log level: " << g_CurrentLogLevel << std::endl;
+
+	generic_output_str.append("Active log filter: ");
 	for (unsigned int index = to_underlying(CXBXR_MODULE::CXBXR); index < to_underlying(CXBXR_MODULE::MAX); index++) {
 		if (g_EnabledModules[index]) {
-			EmuLogOutputEx(cxbxr_module, LOG_LEVEL::INFO, "Active log filter: %s", g_EnumModules2String[index]);
+			std::cout << generic_output_str << g_EnumModules2String[index] << "\n";
 		}
 	}
+	std::cout << std::flush;
 }
 
 // Use kernel managed environment
@@ -300,15 +275,14 @@ void log_init_popup_msg()
 
 // TODO: Move PopupPlatformHandler into common GUI's window source code or use imgui in the future.
 // PopupPlatformHandler is intended to be use as internal wrapper function.
-static PopupReturn PopupPlatformHandler(const char* msg, const PopupReturn ret_default, const UINT uType, const HWND hWnd)
+static PopupReturn PopupPlatformHandler(const char* msg, const PopupIcon icon,
+	const PopupButtons buttons, const PopupReturn ret_default, const UINT uType, const HWND hWnd)
 {
-#ifdef CXBXR_UWP
-	// UWP has no MessageBox. The host can surface logged errors through its
-	// callback/UI while the emulation core follows the documented default.
-	UNREFERENCED_PARAMETER(msg);
-	UNREFERENCED_PARAMETER(uType);
-	UNREFERENCED_PARAMETER(hWnd);
-	return ret_default;
+#if defined(CXBXR_UWP)
+	return static_cast<PopupReturn>(CxbxEmbedRuntimePrompt(
+		static_cast<CxbxEmbedPromptIcon>(icon),
+		static_cast<CxbxEmbedPromptButtons>(buttons),
+		static_cast<CxbxEmbedPromptResult>(ret_default), msg));
 #else
 	int ret = MessageBox(hWnd, msg, /*lpCaption=*/TEXT("Cxbx-Reloaded"), uType);
 
@@ -326,7 +300,7 @@ static PopupReturn PopupPlatformHandler(const char* msg, const PopupReturn ret_d
             return PopupReturn::Ignore;
         case IDYES:
             return PopupReturn::Yes;
-		case IDNO:
+        case IDNO:
             return PopupReturn::No;
     }
 #endif
@@ -396,7 +370,7 @@ PopupReturn PopupCustomEx(const void* hwnd, const CXBXR_MODULE cxbxr_module, con
 		return ret_default;
 	}
 
-	return PopupPlatformHandler(Buffer.data(), ret_default, uType, (const HWND)hwnd);
+	return PopupPlatformHandler(Buffer.data(), icon, buttons, ret_default, uType, (const HWND)hwnd);
 }
 
 const bool needs_escape(const wint_t _char)

@@ -29,7 +29,7 @@
 #include "common\Settings.hpp"
 #include "Mutex.h"
 #include "common\IPCHybrid.hpp"
-#include "common\input\Button.h"
+#include "common\input\InputConstants.h"
 #include "common/xbox_types.h"
 #include "CxbxVersion.h"
 #include "core/common/imgui/settings.h"

@@ -34,7 +34,11 @@
 #include <map>
 #include <functional>
 #include <condition_variable>
+#if defined(CXBXR_UWP)
+#include <SDL3/SDL.h>
+#else
 #include "SDL.h"
+#endif
 
 #define DIRECTION_IN      0
 #define DIRECTION_OUT     1

@@ -13,6 +13,7 @@
 #define XBOXKRNL_H
 
 #include "xbox_types.h"
+#include <atomic>
 
 namespace xbox
 {
@@ -30,7 +31,7 @@ namespace xbox
 #define XBSYSAPI DECLSPEC_EXTERN
 // The KRNL macro prevents naming collisions
 #define KRNL(API) KRNL##API
-#define RESTRICTED_POINTER
+#define RESTRICTED_POINTER XBOX_PTR32
 //TODO : When #define RESTRICTED_POINTER __restrict
 
 // ******************************************************************
@@ -91,6 +92,8 @@ typedef void* LPSECURITY_ATTRIBUTES;
 #define X_STATUS_BUFFER_TOO_SMALL 0xC0000023L
 #define X_STATUS_INVALID_PARAMETER 0xC000000DL
 #define X_STATUS_INVALID_PARAMETER_2 0xC00000F0L
+#define X_STATUS_INVALID_PARAMETER_4 0xC00000F2L
+#define X_STATUS_INVALID_PARAMETER_7 0xC00000F5L
 #define X_STATUS_ALERTED 0x00000101L
 #define X_STATUS_USER_APC 0x000000C0L
 #define X_STATUS_DATA_OVERRUN 0xC000003CL // The SCSI input buffer was too large (not necessarily an error!)
@@ -266,12 +269,15 @@ typedef struct _STRING
     ushort_xt  MaximumLength;
     PCHAR   Buffer;
 }
-STRING, ANSI_STRING, *PSTRING, *PANSI_STRING;
+STRING, ANSI_STRING;
+using PSTRING = ptr_xt<STRING>;
+using PANSI_STRING = ptr_xt<ANSI_STRING>;
 
 // ******************************************************************
 // * OBJECT_STRING
 // ******************************************************************
-typedef STRING OBJECT_STRING, *POBJECT_STRING;
+typedef STRING OBJECT_STRING;
+using POBJECT_STRING = ptr_xt<OBJECT_STRING>;
 
 // ******************************************************************
 // * UNICODE_STRING
@@ -280,26 +286,30 @@ typedef struct _UNICODE_STRING
 {
     ushort_xt  Length;
     ushort_xt  MaximumLength;
-    wchar_xt  *Buffer;
+    ptr_xt<wchar_xt> Buffer;
 }
-UNICODE_STRING, *PUNICODE_STRING;
+UNICODE_STRING;
+using PUNICODE_STRING = ptr_xt<UNICODE_STRING>;
 
 // ******************************************************************
 // * LIST_ENTRY
 // ******************************************************************
 typedef struct _LIST_ENTRY
 {
-    struct _LIST_ENTRY *Flink;
-    struct _LIST_ENTRY *Blink;
+    ptr_xt<struct _LIST_ENTRY> Flink;
+    ptr_xt<struct _LIST_ENTRY> Blink;
 }
-LIST_ENTRY, *PLIST_ENTRY;
+LIST_ENTRY;
+using PLIST_ENTRY = ptr_xt<LIST_ENTRY>;
 
 // ******************************************************************
 // * SLIST_ENTRY
 // ******************************************************************
 typedef struct _SINGLE_LIST_ENTRY {
-	struct _SINGLE_LIST_ENTRY  *Next;
-} SINGLE_LIST_ENTRY, *PSINGLE_LIST_ENTRY, SLIST_ENTRY, *PSLIST_ENTRY;
+ptr_xt<struct _SINGLE_LIST_ENTRY> Next;
+} SINGLE_LIST_ENTRY, SLIST_ENTRY;
+using PSINGLE_LIST_ENTRY = ptr_xt<SINGLE_LIST_ENTRY>;
+using PSLIST_ENTRY = ptr_xt<SLIST_ENTRY>;
 
 typedef union _SLIST_HEADER {
 	ulonglong_xt Alignment;
@@ -558,10 +568,6 @@ typedef struct _OBJECT_HEADER {
 	quad_xt Body;
 } OBJECT_HEADER, *POBJECT_HEADER;
 
-// Source : DXBX
-typedef ulong_ptr_xt KSPIN_LOCK;
-typedef KSPIN_LOCK *PKSPIN_LOCK;
-
 // ******************************************************************
 // * FILETIME
 // ******************************************************************
@@ -675,7 +681,8 @@ typedef struct _FILE_NETWORK_OPEN_INFORMATION {
 	LARGE_INTEGER   AllocationSize;
 	LARGE_INTEGER   EndOfFile;
 	ulong_xt           FileAttributes;
-} FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
+} FILE_NETWORK_OPEN_INFORMATION;
+using PFILE_NETWORK_OPEN_INFORMATION = ptr_xt<FILE_NETWORK_OPEN_INFORMATION>;
 
 // ******************************************************************
 // * FILE_ATTRIBUTE_TAG_INFORMATION
@@ -1451,7 +1458,8 @@ typedef struct _FILE_OBJECT {
 	long_xt                      LockCount;          // 0x24
 	KEVENT                    Lock;               // 0x28
 	KEVENT                    Event;              // 0x38
-} FILE_OBJECT, *PFILE_OBJECT;
+} FILE_OBJECT;
+using PFILE_OBJECT = ptr_xt<FILE_OBJECT>;
 
 // ******************************************************************
 // * DUMMY_FILE_OBJECT
@@ -1462,7 +1470,8 @@ typedef struct _DUMMY_FILE_OBJECT
 {
 	OBJECT_HEADER ObjectHeader;
 	char_xt       FileObjectBody[sizeof(FILE_OBJECT)];
-} DUMMY_FILE_OBJECT, *PDUMMY_FILE_OBJECT;
+} DUMMY_FILE_OBJECT;
+using PDUMMY_FILE_OBJECT = ptr_xt<DUMMY_FILE_OBJECT>;
 
 // ******************************************************************
 // * OPEN_PACKET
@@ -1523,7 +1532,7 @@ typedef struct _KTIMER
     DISPATCHER_HEADER   Header;           // 0x00
     ULARGE_INTEGER      DueTime;          // 0x10
     LIST_ENTRY          TimerListEntry;   // 0x18
-    struct _KDPC       *Dpc;              // 0x20
+    ptr_xt<struct _KDPC> Dpc;             // 0x20
     long_xt             Period;           // 0x24
 }
 KTIMER, *PKTIMER;
@@ -1531,7 +1540,7 @@ KTIMER, *PKTIMER;
 // ******************************************************************
 // * PKSTART_ROUTINE
 // ******************************************************************
-typedef void_xt (NTAPI *PKSTART_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKSTART_ROUTINE)
 (
     IN PVOID StartContext
 );
@@ -1547,7 +1556,7 @@ typedef void_xt (NTAPI *PKSTART_ROUTINE)
 // *       opposed to 1.
 // *
 // ******************************************************************
-typedef void_xt (NTAPI *PKSYSTEM_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKSYSTEM_ROUTINE)
 (
 	IN PKSTART_ROUTINE StartRoutine OPTIONAL,
 	IN PVOID StartContext OPTIONAL
@@ -1558,7 +1567,7 @@ struct _KDPC;
 // ******************************************************************
 // * PKDEFERRED_ROUTINE
 // ******************************************************************
-typedef void_xt (NTAPI *PKDEFERRED_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKDEFERRED_ROUTINE)
 (
     IN struct _KDPC *Dpc,
     IN PVOID         DeferredContext,
@@ -1665,7 +1674,7 @@ KOBJECTS, *PKOBJECTS;
 // ******************************************************************
 // * PKNORMAL_ROUTINE
 // ******************************************************************
-typedef void_xt (NTAPI *PKNORMAL_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKNORMAL_ROUTINE)
 (
 	IN PVOID NormalContext,
 	IN PVOID SystemArgument1,
@@ -1675,7 +1684,7 @@ typedef void_xt (NTAPI *PKNORMAL_ROUTINE)
 // ******************************************************************
 // * PKKERNEL_ROUTINE
 // ******************************************************************
-typedef void_xt (NTAPI *PKKERNEL_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKKERNEL_ROUTINE)
 (
 	IN struct _KAPC *Apc,
 	IN OUT PKNORMAL_ROUTINE *NormalRoutine,
@@ -1687,7 +1696,7 @@ typedef void_xt (NTAPI *PKKERNEL_ROUTINE)
 // ******************************************************************
 // * PKRUNDOWN_ROUTINE
 // ******************************************************************
-typedef void_xt (NTAPI *PKRUNDOWN_ROUTINE)
+typedef void_xt (NTAPI *XBOX_PTR32 PKRUNDOWN_ROUTINE)
 (
 	IN struct _KAPC *Apc
 );
@@ -1695,7 +1704,7 @@ typedef void_xt (NTAPI *PKRUNDOWN_ROUTINE)
 // ******************************************************************
 // * PKSYNCHRONIZE_ROUTINE
 // ******************************************************************
-typedef boolean_xt (NTAPI *PKSYNCHRONIZE_ROUTINE)
+typedef boolean_xt (NTAPI *XBOX_PTR32 PKSYNCHRONIZE_ROUTINE)
 (
 	IN PVOID SynchronizeContext
 );
@@ -1857,7 +1866,8 @@ typedef struct _KPROCESS
 	/* 0x1A/26 */ char_xt DisableQuantum;
 	/* 0x1B/27 */ char_xt _padding;
 }
-KPROCESS, *PKPROCESS;
+KPROCESS;
+using PKPROCESS = ptr_xt<KPROCESS>;
 
 // ******************************************************************
 // * KAPC_STATE
@@ -1921,7 +1931,7 @@ typedef struct _KSTART_FRAME
 typedef struct _KSWITCHFRAME
 {
 	PVOID ExceptionList;
-	dword_xt Unknown;
+	dword_xt Eflags;
 	PVOID RetAddr;
 } KSWITCHFRAME, *PKSWITCHFRAME;
 
@@ -2006,7 +2016,8 @@ typedef struct _KTRAP_FRAME
 }
 KTRAP_FRAME, *PKTRAP_FRAME;
 
-typedef struct _KTHREAD KTHREAD, *PKTHREAD; // forward
+typedef struct _KTHREAD KTHREAD; // forward
+using PKTHREAD = ptr_xt<KTHREAD>;
 
 // ******************************************************************
 // * KWAIT_BLOCK
@@ -2017,12 +2028,13 @@ typedef struct _KWAIT_BLOCK
 	LIST_ENTRY WaitListEntry;
 	PKTHREAD Thread;
 	PVOID Object;
-	struct _KWAIT_BLOCK *NextWaitBlock;
+	ptr_xt<struct _KWAIT_BLOCK> NextWaitBlock;
 	word_xt WaitKey;
 	uchar_xt WaitType;
 	uchar_xt SpareByte;
 }
-KWAIT_BLOCK, *PKWAIT_BLOCK;
+KWAIT_BLOCK;
+using PKWAIT_BLOCK = ptr_xt<KWAIT_BLOCK>;
 
 // ******************************************************************
 // * KAPC
@@ -2041,7 +2053,9 @@ typedef struct _KAPC
 	/* 0x20/32 */ PVOID SystemArgument1;
 	/* 0x24/36 */ PVOID SystemArgument2;
 }
-KAPC, *PKAPC, *RESTRICTED_POINTER PRKAPC;
+KAPC;
+using PKAPC = ptr_xt<KAPC>;
+using PRKAPC = ptr_xt<KAPC>;
 
 // ******************************************************************
 // * KTHREAD
@@ -2055,10 +2069,10 @@ typedef struct _KTHREAD
 	/* 0x0/0 */ DISPATCHER_HEADER Header;
 	/* 0x10/16 */ LIST_ENTRY MutantListHead;
 	/* 0x18/24 */ unsigned long KernelTime;
-	/* 0x1C/28 */ void *StackBase;
-	/* 0x20/32 */ void *StackLimit;
-	/* 0x24/36 */ void *KernelStack;
-	/* 0x28/40 */ void *TlsData;
+	/* 0x1C/28 */ PVOID StackBase;
+	/* 0x20/32 */ PVOID StackLimit;
+	/* 0x24/36 */ PVOID KernelStack;
+	/* 0x28/40 */ PVOID TlsData;
 	/* 0x2C/44 */ char_xt State;
 	/* 0x2D/45 */ char_xt Alerted[2];
 	/* 0x2F/47 */ char_xt Alertable;
@@ -2096,7 +2110,8 @@ typedef struct _KTHREAD
 	/* 0x104/260 */ LIST_ENTRY ThreadListEntry;
 	/* 0x10C/268 */ uchar_xt _padding[4];
 }
-KTHREAD, *PKTHREAD, *RESTRICTED_POINTER PRKTHREAD;
+KTHREAD;
+using PRKTHREAD = ptr_xt<KTHREAD>;
 
 #define X_MAXIMUM_SUSPEND_COUNT 0x7F
 
@@ -2125,7 +2140,7 @@ static_assert(sizeof(ETHREAD) == 0x140);
 // ******************************************************************
 // * PCREATE_THREAD_NOTIFY_ROUTINE
 // ******************************************************************
-typedef void_xt(*PCREATE_THREAD_NOTIFY_ROUTINE)
+typedef void_xt(NTAPI *PCREATE_THREAD_NOTIFY_ROUTINE)
 (
 	IN PETHREAD Thread,
 	IN HANDLE ThreadId,
@@ -2551,13 +2566,8 @@ INLINE static ulong_xt READ_REGISTER_ULONG(PULONG Address)
 // ******************************************************************
 static void_xt WRITE_REGISTER_UCHAR(PVOID Address, uchar_xt Value)
 {
-    __asm
-    {
-        mov edx, Address
-        mov ah, Value
-        mov [edx], ah
-        lock or Address, edx
-    };
+	*reinterpret_cast<volatile uchar_xt*>(Address) = Value;
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 // ******************************************************************
@@ -2571,13 +2581,8 @@ static void_xt WRITE_REGISTER_UCHAR(PVOID Address, uchar_xt Value)
 // ******************************************************************
 static void_xt WRITE_REGISTER_USHORT(PVOID Address, ushort_xt Value)
 {
-    __asm
-    {
-        mov edx, Address
-        mov ax, Value
-        mov [edx], ax
-        lock or Address, edx
-    };
+	*reinterpret_cast<volatile ushort_xt*>(Address) = Value;
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 // ******************************************************************
@@ -2591,13 +2596,8 @@ static void_xt WRITE_REGISTER_USHORT(PVOID Address, ushort_xt Value)
 // ******************************************************************
 static void_xt WRITE_REGISTER_ULONG(PVOID Address, ulong_xt Value)
 {
-    __asm
-    {
-        mov edx, Address
-        mov eax, Value
-        mov [edx], eax
-        lock or Address, edx
-    };
+	*reinterpret_cast<volatile ulong_xt*>(Address) = Value;
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 // ******************************************************************
@@ -2933,7 +2933,7 @@ typedef struct _IRP
 			union {
 				KDEVICE_QUEUE_ENTRY DeviceQueueEntry;
 				struct {
-					PVOID DriverContext[4];
+					PVOID DriverContext[5];
 				};
 			};
 			PETHREAD Thread;
@@ -2977,5 +2977,3 @@ typedef struct _MU_EXTENSION {
 }
 
 #endif
-
-

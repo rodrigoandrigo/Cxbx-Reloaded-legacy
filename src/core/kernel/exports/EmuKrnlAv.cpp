@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -324,6 +324,11 @@ XBSYSAPI EXPORTNUM(3) xbox::ulong_xt NTAPI xbox::AvSetDisplayMode
 	LOG_INCOMPLETE();
 
 	REG_WR32(RegisterBase, NV_PRAMDAC_GENERAL_CONTROL, GeneralControl);
+
+	if (iRegister >= _countof(AvpRegisters) || iCRTC >= _countof(AvpCRTCRegisters)) {
+		EmuLog(LOG_LEVEL::WARNING, "AvSetDisplayMode: mode indices out of range (iRegister=%u, iCRTC=%u)", iRegister, iCRTC);
+		RETURN(X_STATUS_INVALID_PARAMETER);
+	}
 
 	const ULONG* pLong = AvpRegisters[iRegister];
 	const ULONG* pLongMax = pLong + sizeof(AvpRegisters[0]) / sizeof(ULONG);

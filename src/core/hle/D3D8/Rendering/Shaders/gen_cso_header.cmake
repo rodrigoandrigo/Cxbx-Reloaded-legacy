@@ -6,20 +6,9 @@ file(READ "${CSO_FILE}" CSO_DATA HEX)
 string(LENGTH "${CSO_DATA}" CSO_HEX_LEN)
 math(EXPR CSO_BYTE_COUNT "${CSO_HEX_LEN} / 2")
 
-# Build unsigned char array from hex pairs
-set(ARRAY_BODY "")
-set(COL 0)
-math(EXPR LAST_BYTE "${CSO_BYTE_COUNT} - 1")
-foreach(I RANGE 0 ${LAST_BYTE})
-    math(EXPR POS "${I} * 2")
-    string(SUBSTRING "${CSO_DATA}" ${POS} 2 BYTE_HEX)
-    string(APPEND ARRAY_BODY "0x${BYTE_HEX},")
-    math(EXPR COL "${COL} + 1")
-    if(COL EQUAL 16)
-        string(APPEND ARRAY_BODY "\n    ")
-        set(COL 0)
-    endif()
-endforeach()
+# Build the unsigned-char array in one pass. Appending once per byte makes
+# large shader blobs quadratic and can stall CMake for several minutes.
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," ARRAY_BODY "${CSO_DATA}")
 
 file(WRITE "${HEADER_FILE}"
 "// Auto-generated from ${CSO_FILE} — do not edit.\n"

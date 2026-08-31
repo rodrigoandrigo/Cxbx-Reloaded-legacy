@@ -44,7 +44,7 @@ typedef struct RAMHTEntry {
 #include "core\hle\D3D8\Rendering\Backend\Backend_D3D11_Profiler.h"
 
 static RAMHTEntry ramht_lookup(NV2AState *d, uint32_t handle); // forward declaration
-static void pfifo_run_puller(NV2AState *d); // forward declaration
+static bool pfifo_run_puller(NV2AState *d); // forward declaration
 static void pfifo_run_pusher(NV2AState *d); // forward declaration
 
 /* PFIFO - MMIO and DMA FIFO submission to PGRAPH and VPE */
@@ -82,7 +82,7 @@ DEVICE_READ32(PFIFO)
 
 	DEVICE_READ32_SWITCH() {
 	case NV_PFIFO_RAMHT:
-		result = 0x03000100; // = NV_PFIFO_RAMHT_SIZE_4K | NV_PFIFO_RAMHT_BASE_ADDRESS(NumberOfPaddingBytes >> 12) | NV_PFIFO_RAMHT_SEARCH_128
+		result = 0x03000100; // = NV_PFIFO_RAMHT_SIZE_4K | NV_PFIFO_RAMHT_BASE_ADDRESS(0x10) | NV_PFIFO_RAMHT_SEARCH_128 → RAMHT at PRAMIN+0x10000
 		break;
 	case NV_PFIFO_RAMFC:
 		result = 0x00890110; // = ? | NV_PFIFO_RAMFC_SIZE_2K | ?
@@ -125,15 +125,20 @@ DEVICE_WRITE32(PFIFO)
 	}
 
     qemu_cond_broadcast(&d->pfifo.pusher_cond);
-    qemu_cond_broadcast(&d->pfifo.puller_cond);
+    SetEvent(d->pfifo.puller_event);
 
     qemu_mutex_unlock(&d->pfifo.pfifo_lock);
 
 	DEVICE_WRITE32_END(PFIFO);
 }
+// Set by NV097_FLIP_STALL handler, cleared by puller after checking.
+// When true, FLIP_STALL already presented (with overlay compositing),
+// so the puller's idle overlay path should not double-present.
+bool g_PullerFlipStallThisCycle = false;
 
-static void pfifo_run_puller(NV2AState *d)
+static bool pfifo_run_puller(NV2AState *d)
 {
+    bool processed_any = false;
     uint32_t *pull0 = &d->pfifo.regs[RI(NV_PFIFO_CACHE1_PULL0)];
     uint32_t *pull1 = &d->pfifo.regs[RI(NV_PFIFO_CACHE1_PULL1)];
     uint32_t *engine_reg = &d->pfifo.regs[RI(NV_PFIFO_CACHE1_ENGINE)];
@@ -182,6 +187,7 @@ static void pfifo_run_puller(NV2AState *d)
 
         // Process pushbuffer methods into PGRAPH register state.
         // Skip object binding (method 0) — Xbox uses a single channel.
+        processed_any = true;
         if (method >= 0x180 && method < 0x200) {
             // DMA context binding methods: parameter is a handle that must
             // be resolved via RAMHT to get the PRAMIN instance address.
@@ -196,6 +202,7 @@ static void pfifo_run_puller(NV2AState *d)
     }
 
     qemu_mutex_unlock(&d->pgraph.pgraph_lock);
+    return processed_any;
 }
 
 // Defined in HostSync.cpp — marks the current thread as the PFIFO puller
@@ -203,7 +210,7 @@ static void pfifo_run_puller(NV2AState *d)
 extern void CxbxSetPullerContext(bool active);
 
 // Forward declaration: auto-present on VBlank for games without explicit FLIP_STALL
-extern void(*pgraph_flip_stall)(NV2AState *d);
+#include "nv2a_pgraph_backend.h"
 extern bool g_pgraph_explicit_flip_stall_seen;
 
 int pfifo_puller_thread(NV2AState *d)
@@ -213,34 +220,54 @@ int pfifo_puller_thread(NV2AState *d)
     CxbxSetPullerContext(true);
 
     qemu_mutex_lock(&d->pfifo.pfifo_lock);
-    while (true) {
-        pfifo_run_puller(d);
+    while (!d->exiting) {
+        bool had_commands = pfifo_run_puller(d);
 
-        // Auto-present fallback: only for raw push buffer games that never issue
-        // an explicit NV097_FLIP_STALL. Once we've seen one, the title is driving
-        // its own flips and any auto-present here would cause mid-frame flicker.
-        if (pgraph_flip_stall && !g_pgraph_explicit_flip_stall_seen
-            && d->pgraph.surface_color.draw_dirty) {
-            d->pgraph.surface_color.draw_dirty = false;
-            pgraph_flip_stall(d);
+        // Present logic — at most one present per wake-up cycle.
+        // The two paths are mutually exclusive (else-if) to prevent
+        // double-presenting when both auto-present and overlay are relevant.
+        // Release pfifo_lock during flip_stall to avoid deadlock: the HLE
+        // draw path acquires D3D11 lock → pfifo_lock (via pfifo_flush),
+        // while the puller holds pfifo_lock → D3D11 lock (via flip_stall).
+        if (g_pgraph_backend.flip_stall) {
+            if (!g_pgraph_explicit_flip_stall_seen
+                && d->pgraph.surface_color.draw_dirty) {
+                // Auto-present fallback for raw pushbuffer games that never
+                // issue NV097_FLIP_STALL.
+                d->pgraph.surface_color.draw_dirty = false;
+                qemu_mutex_unlock(&d->pfifo.pfifo_lock);
+                g_pgraph_backend.flip_stall(d);
+                qemu_mutex_lock(&d->pfifo.pfifo_lock);
+            } else if (d->enable_overlay && !g_PullerFlipStallThisCycle) {
+                // PVIDEO overlay present: composite and display the overlay
+                // at frame rate. Only skip when FLIP_STALL already presented
+                // this cycle (it composites overlay too). Clear draw_dirty
+                // so stale 3D→FMV transition state doesn't block anything.
+                d->pgraph.surface_color.draw_dirty = false;
+                qemu_mutex_unlock(&d->pfifo.pfifo_lock);
+                g_pgraph_backend.flip_stall(d);
+                qemu_mutex_lock(&d->pfifo.pfifo_lock);
+            }
+            g_PullerFlipStallThisCycle = false;
         }
 
         // If the HLE thread is waiting for a PFIFO flush, signal it now
-        // that CACHE1 has been drained.  The waiter will re-check whether
-        // the DMA pusher also needs another cycle.
+        // that CACHE1 has been drained.
         if (d->pfifo.flush_requested) {
             qemu_cond_signal(&d->pfifo.flush_complete_cond);
         }
 
-        qemu_cond_wait(&d->pfifo.puller_cond, &d->pfifo.pfifo_lock);
-
-        if (d->exiting) {
-            break;
-        }
+        // Release pfifo_lock while sleeping so other threads can access PFIFO
+        // registers.  Use a simple auto-reset event (puller_event) instead of
+        // qemu_cond — any thread can signal it without holding pfifo_lock,
+        // eliminating the deadlock-prone continue_event protocol.
+        qemu_mutex_unlock(&d->pfifo.pfifo_lock);
+        WaitForSingleObject(d->pfifo.puller_event, INFINITE);
+        qemu_mutex_lock(&d->pfifo.pfifo_lock);
     }
     qemu_mutex_unlock(&d->pfifo.pfifo_lock);
 
-	return NULL;
+	return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +339,31 @@ void pfifo_submit_pushbuffer(NV2AState *d, void *pPushData, uint32_t uSizeInByte
                     }
                 } else {
                     pgraph_handle_method(d, state.subc, method, word);
+                }
+
+                // Squash repeated BEGIN/DRAW_ARRAYS/END (xemu approach):
+                // peek ahead for END, BEGIN(same_mode), DRAW_ARRAYS pattern.
+                if (method == NV097_DRAW_ARRAYS && state.mcnt == 1) {
+                    PGRAPHState *pg = &d->pgraph;
+                    ptrdiff_t remaining_words = dma_put - dma_get;
+                    if (remaining_words >= 6 &&
+                        pg->inline_elements_length == 0 &&
+                        pg->draw_arrays_length > 0 &&
+                        pg->draw_arrays_length < (ARRAY_SIZE(pg->draw_arrays_start) - 1)) {
+                        uint32_t w0 = dma_get[0];  // expected: END header
+                        uint32_t w1 = dma_get[1];  // expected: END param (0)
+                        uint32_t w2 = dma_get[2];  // expected: BEGIN header
+                        uint32_t w3 = dma_get[3];  // expected: BEGIN param (primitive_mode)
+                        uint32_t w4 = dma_get[4];  // expected: DRAW_ARRAYS header
+                        if ((w0 & 0x1FFC) == NV097_SET_BEGIN_END &&
+                            w1 == NV097_SET_BEGIN_END_OP_END &&
+                            (w2 & 0x1FFC) == NV097_SET_BEGIN_END &&
+                            w3 == pg->primitive_mode &&
+                            (w4 & 0x1FFC) == NV097_DRAW_ARRAYS) {
+                            dma_get += 4;  // skip END hdr+param, BEGIN hdr+param
+                            pg->draw_arrays_prevent_connect = true;
+                        }
+                    }
                 }
             }
 
@@ -419,12 +471,17 @@ void pfifo_flush_to_pgraph(NV2AState *d)
                            && !GET_MASK(dma_push, NV_PFIFO_CACHE1_DMA_PUSH_STATUS);
         if (pusher_can_run) {
             // Process the DMA push buffer inline on the calling thread.
-            // pfifo_lock is already held, exactly as in pfifo_pusher_thread.
+            // Release pfifo_lock during processing: pfifo_run_pusher may
+            // acquire D3D11ContextLock (via draw/flip_stall callbacks), and
+            // the puller thread can hold D3D11ContextLock while waiting for
+            // pfifo_lock (overlay present) → deadlock if we hold pfifo_lock.
             // Mark this thread as puller context so that any draw callback
             // triggered by pgraph_handle_method (e.g. pgraph_draw_arrays)
             // does not attempt a re-entrant pfifo_flush_to_pgraph.
             CxbxSetPullerContext(true);
+            qemu_mutex_unlock(&d->pfifo.pfifo_lock);
             pfifo_run_pusher(d);
+            qemu_mutex_lock(&d->pfifo.pfifo_lock);
             CxbxSetPullerContext(false);
         } else {
             // Advance GET past the unprocessable commands.
@@ -538,6 +595,39 @@ static void pfifo_run_pusher(NV2AState *d)
                 }
             } else if (method >= 0x100) {
                 pgraph_handle_method(d, method_subchannel, method, word);
+            }
+
+            // Squash repeated BEGIN/DRAW_ARRAYS/END sequences (xemu approach):
+            // After the last data word of a DRAW_ARRAYS command, peek ahead in
+            // the DMA pushbuffer for the exact pattern END, BEGIN(same_mode),
+            // DRAW_ARRAYS.  If found, skip the END/BEGIN pair so the next
+            // DRAW_ARRAYS accumulates into the same batch.  Any intervening
+            // method (texture switch, render target change, etc.) breaks the
+            // pattern and prevents incorrect cross-state merging.
+            if (method == NV097_DRAW_ARRAYS && method_count == 1) {
+                PGRAPHState *pg = &d->pgraph;
+                uint32_t dma_put_v = *dma_put;
+                uint32_t remaining = (dma_put_v > dma_get_v) ? (dma_put_v - dma_get_v) : 0;
+                if (remaining >= 24 &&  // 6 words: END hdr+param, BEGIN hdr+param, DA hdr+param
+                    pg->inline_elements_length == 0 &&
+                    pg->draw_arrays_length > 0 &&
+                    pg->draw_arrays_length < (ARRAY_SIZE(pg->draw_arrays_start) - 1)) {
+                    uint32_t *peek = (uint32_t*)(dma + dma_get_v);
+                    uint32_t w0 = ldl_le_p(&peek[0]);  // expected: END header
+                    uint32_t w1 = ldl_le_p(&peek[1]);  // expected: END param (0)
+                    uint32_t w2 = ldl_le_p(&peek[2]);  // expected: BEGIN header
+                    uint32_t w3 = ldl_le_p(&peek[3]);  // expected: BEGIN param (primitive_mode)
+                    uint32_t w4 = ldl_le_p(&peek[4]);  // expected: DRAW_ARRAYS header
+                    if ((w0 & 0x1FFC) == NV097_SET_BEGIN_END &&
+                        w1 == NV097_SET_BEGIN_END_OP_END &&
+                        (w2 & 0x1FFC) == NV097_SET_BEGIN_END &&
+                        w3 == pg->primitive_mode &&
+                        (w4 & 0x1FFC) == NV097_DRAW_ARRAYS) {
+                        // Skip END header+param and BEGIN header+param (4 words)
+                        dma_get_v += 16;
+                        pg->draw_arrays_prevent_connect = true;
+                    }
+                }
             }
 
             if (method_type == NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC) {
@@ -659,7 +749,11 @@ int pfifo_pusher_thread(NV2AState *d)
     while (true) {
         {
             CXBX_PROFILE_SCOPE(PROF_PFIFO_PUSHER);
+            // Release pfifo_lock during processing to prevent deadlock with
+            // the puller thread's D3D11ContextLock → pfifo_lock ordering.
+            qemu_mutex_unlock(&d->pfifo.pfifo_lock);
             pfifo_run_pusher(d);
+            qemu_mutex_lock(&d->pfifo.pfifo_lock);
         }
 
         // flush_requested is no longer set by pfifo_flush_to_pgraph (flush now

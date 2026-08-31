@@ -26,8 +26,9 @@
 #include "devices\video\nv2a.h"        // PGRAPHState, nv2a_regs.h, GET_MASK, RI
 #include "core\hle\D3D8\Rendering\NV2A_PGRAPH_Helpers.h"
 #include "common/util/hasher.h"
-#include <algorithm>                    // std::min
+#include <algorithm>                    // std::min, std::sort
 #include <unordered_map>
+#include <vector>
 
 // Tracked viewport dimensions — updated every time the viewport is set.
 // Used by GS constant buffer update to avoid RSGetViewports() per draw.
@@ -265,6 +266,25 @@ void CxbxD3D11UpdatePipelineStateFromPGRAPH(PGRAPHState *pg)
 		}
 	}
 
+	// DOT_ZW depth override: On NV2A, DOT_ZW replaces the fragment Z value which
+	// then flows through the normal depth pipeline. If the game disabled depth
+	// (DepthEnable=FALSE) but DOT_ZW is active, we must force depth writing so
+	// SV_Depth from the pixel shader actually reaches the depth buffer.
+	{
+		uint32_t shaderProg = pg->regs[RI(NV_PGRAPH_SHADERPROG)];
+		bool hasDotZW = false;
+		for (int i = 0; i < 4; i++) {
+			if (((shaderProg >> (i * 5)) & 0x1F) == 0x0A) { hasDotZW = true; break; }
+		}
+		if (hasDotZW) {
+			// Force depth enabled with full write — DOT_ZW replaces
+			// the fragment Z unconditionally on NV2A hardware.
+			g_D3D11DepthStencilDesc.DepthEnable = TRUE;
+			g_D3D11DepthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+			g_bD3D11DepthStencilStateDirty = true;
+		}
+	}
+
 	// ---- Rasterizer state from NV_PGRAPH_SETUPRASTER (0x1990) ----
 	{
 		uint32_t setup = pg->regs[RI(NV_PGRAPH_SETUPRASTER)];
@@ -389,8 +409,11 @@ static D3D11_FILTER BuildD3D11Filter(unsigned int minFilter, unsigned int magFil
 
 	if (anisotropic) return D3D11_FILTER_ANISOTROPIC;
 
-	// D3D11 filter encoding: bit 4=minLinear, bit 2=magLinear, bit 0=mipLinear
-	return (D3D11_FILTER)((minLinear ? 0x10 : 0) | (magLinear ? 0x04 : 0) | (mipLinear ? 0x01 : 0));
+	return D3D11_ENCODE_BASIC_FILTER(
+		minLinear ? D3D11_FILTER_TYPE_LINEAR : D3D11_FILTER_TYPE_POINT,
+		magLinear ? D3D11_FILTER_TYPE_LINEAR : D3D11_FILTER_TYPE_POINT,
+		mipLinear ? D3D11_FILTER_TYPE_LINEAR : D3D11_FILTER_TYPE_POINT,
+		D3D11_FILTER_REDUCTION_TYPE_STANDARD);
 }
 
 // ******************************************************************
@@ -409,10 +432,10 @@ void CxbxD3D11UpdateSamplersFromPGRAPH(PGRAPHState *pg)
 	static uint32_t s_CachedBorderColor[4] = {};
 
 	for (int stage = 0; stage < 4; stage++) {
-		uint32_t texAddr   = pg->regs[RI(NV_PGRAPH_TEXADDRESS0 + stage * 4)];
-		uint32_t texFilter = pg->regs[RI(NV_PGRAPH_TEXFILTER0 + stage * 4)];
-		uint32_t texCtl0   = pg->regs[RI(NV_PGRAPH_TEXCTL0_0 + stage * 4)];
-		uint32_t borderCol = pg->regs[RI(NV_PGRAPH_BORDERCOLOR0 + stage * 4)];
+		uint32_t texAddr   = NV2AGetTextureAddressModeRaw(stage);
+		uint32_t texFilter = NV2AGetTextureFilterRaw(stage);
+		uint32_t texCtl0   = NV2AGetTextureControlRaw(stage);
+		uint32_t borderCol = NV2AGetBorderColorRaw(stage);
 
 		// Skip if nothing changed
 		if (texAddr == s_CachedTexAddress[stage] &&
@@ -441,7 +464,7 @@ void CxbxD3D11UpdateSamplersFromPGRAPH(PGRAPHState *pg)
 		unsigned int minFilter = GET_MASK(texFilter, NV_PGRAPH_TEXFILTER0_MIN);
 		unsigned int magFilter = GET_MASK(texFilter, NV_PGRAPH_TEXFILTER0_MAG);
 
-		// LOD bias: 13-bit signed fixed-point (8.5 format)
+		// LOD bias: 13-bit signed fixed-point (5.8 format: 1 sign + 4 integer, 8 fraction)
 		int lodBiasRaw = texFilter & 0x1FFF;
 		if (lodBiasRaw & 0x1000) lodBiasRaw |= ~0x1FFF; // sign-extend
 		float lodBias = lodBiasRaw / 256.0f;
@@ -513,35 +536,25 @@ void CxbxD3D11UpdateViewportFromPGRAPH(PGRAPHState *pg)
 {
 	if (!pg) return;
 
-	// Note: No change-detection fast path here. The viewport/scissor must be
-	// recalculated on every draw because multiple external paths (flip/present,
-	// RT-as-texture invalidation, depth-only unbind) can desync tracked state.
-	// The calculation is cheap (a few floats + two D3D11 calls).
+	// Change-detection: viewport/scissor depends on RT dimensions and surface clip state.
+	// VPSCL is NOT used here — the D3D11 viewport is always set to full RT size,
+	// and the scissor is derived from surface clip registers.
+	static uint32_t s_lastPgraphGen = UINT32_MAX;
+	static uint32_t s_lastSurfaceGen = UINT32_MAX;
 
-	// Read viewport offset and scale from XFCTX constants
-	float vpoff[4], vpscl[4];
-	for (int i = 0; i < 4; i++) {
-		std::memcpy(&vpoff[i], &pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPOFF][i], sizeof(float));
-		std::memcpy(&vpscl[i], &pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPSCL][i], sizeof(float));
-	}
-
-	// If the viewport scale constants are zero, PGRAPH hasn't been programmed
-	// yet (the Xbox D3D runtime hasn't issued SET_VIEWPORT_OFFSET/SCALE).
-	if (vpscl[0] == 0.0f && vpscl[1] == 0.0f) {
+	if (pg->dirty[NV2A_DIRTY_PGRAPH] == s_lastPgraphGen
+		&& pg->dirty[NV2A_DIRTY_SURFACE] == s_lastSurfaceGen)
 		return;
-	}
 
-
-	// Read depth clip range (not yet consumed; retained as placeholder for
-	// future depth range / MinDepth/MaxDepth setup in the viewport below)
-	float minZ, maxZ;
-	std::memcpy(&minZ, &pg->regs[RI(NV_PGRAPH_ZCLIPMIN)], sizeof(float));
-	std::memcpy(&maxZ, &pg->regs[RI(NV_PGRAPH_ZCLIPMAX)], sizeof(float));
-
+	s_lastPgraphGen = pg->dirty[NV2A_DIRTY_PGRAPH];
+	s_lastSurfaceGen = pg->dirty[NV2A_DIRTY_SURFACE];
 
 	DWORD HostRenderTarget_Width, HostRenderTarget_Height;
 	if (!GetHostRenderTargetDimensions(&HostRenderTarget_Width, &HostRenderTarget_Height)) {
-		return; // can't set viewport without RT dimensions
+		// RT not bound yet — reset dirty tracking so we retry next call.
+		s_lastPgraphGen = UINT32_MAX;
+		s_lastSurfaceGen = UINT32_MAX;
+		return;
 	}
 
 	// Scissor from NV2A surface clip registers — matches xemu pgraph_gl/vk_draw_begin.
@@ -674,7 +687,7 @@ void CxbxD3D11ApplyDirtyStates()
 			s_LastGSVpHeight = vpH;
 			s_LastGSLineWidth = g_fLineWidth;
 			float gsConstants[4] = { 1.0f / vpW, 1.0f / vpH, g_fLineWidth, 0.0f };
-			CxbxD3D11UpdateDynamicBuffer(g_pD3D11GSConstantBuffer, gsConstants, sizeof(gsConstants));
+			g_pD3DDeviceContext->UpdateSubresource(g_pD3D11GSConstantBuffer, 0, nullptr, gsConstants, 0, 0);
 			g_pD3DDeviceContext->GSSetConstantBuffers(0, 1, &g_pD3D11GSConstantBuffer);
 		}
 	}
@@ -749,24 +762,26 @@ static DXGI_FORMAT NV097ZetaFormatToDXGI(unsigned int zetaFormat)
 	}
 }
 
-// Cache key for PGRAPH-created render targets / depth stencils
-struct PgraphRTKey {
-	xbox::addr_xt offset;
+// Unified resource cache: keyed by physical VRAM offset for O(1) lookup.
+// Stores render targets, depth stencils, and textures.
+// Multiple entries may exist per offset (different format/dimensions).
+// Replaces the old RT cache that required O(n) linear scan for offset lookup.
+struct ResourceCacheEntry {
+	Microsoft::WRL::ComPtr<ID3D11Texture2D> pTexture;
 	DXGI_FORMAT format;
 	UINT width;
 	UINT height;
+	uint64_t lastAccessFrame;
+	bool isDepthStencil;
+};
+// Each offset maps to a small vector of entries (typically 1–2).
+static std::unordered_map<xbox::addr_xt, std::vector<ResourceCacheEntry>> g_ResourceCache;
+static uint64_t g_ResourceCacheFrameCount = 0;
+static size_t g_ResourceCacheTotalEntries = 0;
 
-	bool operator==(const PgraphRTKey& other) const {
-		return offset == other.offset && format == other.format
-			&& width == other.width && height == other.height;
-	}
-};
-struct PgraphRTKeyHash {
-	size_t operator()(const PgraphRTKey& k) const {
-		return static_cast<size_t>(ComputeHash(&k, sizeof(k)));
-	}
-};
-static std::unordered_map<PgraphRTKey, Microsoft::WRL::ComPtr<ID3D11Texture2D>, PgraphRTKeyHash> g_PgraphRTCache;
+// Elastic eviction watermarks — sized for combined RT + texture population.
+static constexpr size_t RESOURCE_CACHE_HIGH_WATERMARK = 256;
+static constexpr size_t RESOURCE_CACHE_LOW_WATERMARK = 128;
 
 void CxbxResetPgraphSurfaceTracking()
 {
@@ -775,16 +790,77 @@ void CxbxResetPgraphSurfaceTracking()
 	g_pHostPgraphBackBuffer = nullptr;
 	g_PgraphBackBufferWidth = 0;
 	g_PgraphBackBufferHeight = 0;
-	g_PgraphRTCache.clear();
+	g_ResourceCache.clear();
+	g_ResourceCacheTotalEntries = 0;
 }
 
 ID3D11Texture2D* CxbxLookupPgraphRTByOffset(xbox::addr_xt offset)
 {
-	for (auto& entry : g_PgraphRTCache) {
-		if (entry.first.offset == offset)
-			return entry.second.Get();
+	auto it = g_ResourceCache.find(offset);
+	if (it != g_ResourceCache.end() && !it->second.empty()) {
+		// Return the most recently accessed entry at this offset
+		auto& entries = it->second;
+		auto* best = &entries[0];
+		for (size_t i = 1; i < entries.size(); i++) {
+			if (entries[i].lastAccessFrame > best->lastAccessFrame)
+				best = &entries[i];
+		}
+		best->lastAccessFrame = g_ResourceCacheFrameCount;
+		return best->pTexture.Get();
 	}
 	return nullptr;
+}
+
+void CxbxPgraphRTCacheEvict()
+{
+	g_ResourceCacheFrameCount++;
+
+	if (g_ResourceCacheTotalEntries <= RESOURCE_CACHE_HIGH_WATERMARK)
+		return;
+
+	// Collect all entries as eviction candidates (exclude pinned backbuffer)
+	struct EvictCandidate {
+		xbox::addr_xt offset;
+		size_t index;
+		uint64_t lastAccessFrame;
+	};
+	std::vector<EvictCandidate> candidates;
+	candidates.reserve(g_ResourceCacheTotalEntries);
+	for (auto& [offset, entries] : g_ResourceCache) {
+		for (size_t i = 0; i < entries.size(); i++) {
+			if (entries[i].pTexture.Get() != g_pHostPgraphBackBuffer)
+				candidates.push_back({ offset, i, entries[i].lastAccessFrame });
+		}
+	}
+
+	// Sort by lastAccessFrame ascending (oldest first)
+	std::sort(candidates.begin(), candidates.end(),
+		[](const EvictCandidate& a, const EvictCandidate& b) {
+			return a.lastAccessFrame < b.lastAccessFrame;
+		});
+
+	// Evict oldest entries until at or below low watermark
+	size_t toEvict = g_ResourceCacheTotalEntries - RESOURCE_CACHE_LOW_WATERMARK;
+	size_t evicted = 0;
+	for (size_t i = 0; i < candidates.size() && evicted < toEvict; i++) {
+		auto mapIt = g_ResourceCache.find(candidates[i].offset);
+		if (mapIt == g_ResourceCache.end())
+			continue;
+		auto& entries = mapIt->second;
+		// Find and remove the entry (by matching texture pointer, since indices shift)
+		for (auto vecIt = entries.begin(); vecIt != entries.end(); ++vecIt) {
+			if (vecIt->lastAccessFrame == candidates[i].lastAccessFrame
+				&& vecIt->pTexture.Get() != g_pHostPgraphBackBuffer) {
+				entries.erase(vecIt);
+				g_ResourceCacheTotalEntries--;
+				evicted++;
+				break;
+			}
+		}
+		// Remove the offset key if no entries remain
+		if (entries.empty())
+			g_ResourceCache.erase(mapIt);
+	}
 }
 
 void CxbxInvalidatePgraphRTBinding()
@@ -805,10 +881,19 @@ static ID3D11Texture2D* CreateHostSurfaceFromPGRAPH(
 	UINT hostWidth = width * g_RenderUpscaleFactor;
 	UINT hostHeight = height * g_RenderUpscaleFactor;
 
-	PgraphRTKey key = { offset, format, hostWidth, hostHeight };
-	auto it = g_PgraphRTCache.find(key);
-	if (it != g_PgraphRTCache.end())
-		return it->second.Get();
+	// Check unified resource cache — reuse if same offset has matching params
+	auto it = g_ResourceCache.find(offset);
+	if (it != g_ResourceCache.end()) {
+		for (auto& entry : it->second) {
+			if (entry.format == format
+				&& entry.width == hostWidth
+				&& entry.height == hostHeight
+				&& entry.isDepthStencil == isDepthStencil) {
+				entry.lastAccessFrame = g_ResourceCacheFrameCount;
+				return entry.pTexture.Get();
+			}
+		}
+	}
 
 	D3D11_TEXTURE2D_DESC desc = {};
 	desc.Width = hostWidth;
@@ -838,7 +923,9 @@ static ID3D11Texture2D* CreateHostSurfaceFromPGRAPH(
 	}
 
 	auto* pResult = pTexture.Get();
-	g_PgraphRTCache[key] = std::move(pTexture);
+	g_ResourceCache[offset].push_back({ std::move(pTexture), format, hostWidth, hostHeight,
+		g_ResourceCacheFrameCount, isDepthStencil });
+	g_ResourceCacheTotalEntries++;
 
 	// Clear newly created depth stencil surfaces to 1.0 (far plane).
 	// On real NV2A hardware, newly allocated depth memory contains
@@ -877,6 +964,39 @@ void CxbxD3D11UpdateRenderTargetFromPGRAPH(PGRAPHState *pg)
 	UINT rtWidth = surf.clipWidth;
 	UINT rtHeight = surf.clipHeight;
 
+	// For swizzled surfaces, actual dimensions are power-of-2 from logWidth/logHeight
+	if (surf.surfaceType == 0x2 /*NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE*/) {
+		rtWidth = 1u << surf.logWidth;
+		rtHeight = 1u << surf.logHeight;
+	}
+
+	// Apply anti-aliasing factor to surface dimensions.
+	// On NV2A, AA modes physically expand the surface: 2x doubles width,
+	// 4x doubles both. The host RT must match this physical size so that
+	// when the game reads the supersampled buffer back as a texture
+	// (TEXIMAGERECT reflects the AA-scaled dimensions), our cached RT
+	// has the correct dimensions.
+	// Matches xemu's pgraph_apply_anti_aliasing_factor.
+	switch (surf.antiAliasing) {
+	case NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2:
+		rtWidth *= 2;
+		break;
+	case NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_SQUARE_OFFSET_4:
+		rtWidth *= 2;
+		rtHeight *= 2;
+		break;
+	default: // CENTER_1: no scaling
+		break;
+	}
+
+	// For pitch-linear surfaces, include the clip offset in dimensions.
+	// The surface must be large enough to contain the clip region at its offset.
+	// Matches xemu's populate_surface_binding_entry.
+	if (surf.surfaceType != 0x2 /*NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE*/) {
+		rtWidth += surf.clipX;
+		rtHeight += surf.clipY;
+	}
+
 	// Color render target (rebind if offset changed, or if format/pitch/clip changed)
 	bool colorChanged = (colorOffset != prevColorOffset) ||
 		(surf.colorFormat != g_LastBoundSurfaceState.colorFormat) ||
@@ -904,7 +1024,7 @@ void CxbxD3D11UpdateRenderTargetFromPGRAPH(PGRAPHState *pg)
 			uint32_t rtSize = colorPitch * rtHeight;
 			CxbxPageTrackerMarkGPUDirty(colorOffset, rtSize);
 			CxbxPageTrackerRegisterRT(colorOffset, colorPitch,
-				rtWidth, rtHeight, colorBpp, pHostRT);
+				rtWidth, rtHeight, colorBpp, surf.surfaceType, pHostRT);
 		}
 
 		// Track the backbuffer by matching RT dimensions against presentation parameters.
@@ -912,10 +1032,12 @@ void CxbxD3D11UpdateRenderTargetFromPGRAPH(PGRAPHState *pg)
 		// that happens to be rendered before the backbuffer.
 		// Also accept half-height surfaces for field rendering (D3DPRESENTFLAG_FIELD),
 		// where the Xbox renders 640x240 per field into a 640x480 display.
+		// Compare against logical clip dimensions (pre-AA), since presentation
+		// parameters reflect the game's logical resolution, not the supersampled size.
 		if (g_PgraphBackBufferOffset == 0 && pHostRT) {
-			if (rtWidth == g_EmuCDPD.HostPresentationParameters.BackBufferWidth &&
-				(rtHeight == g_EmuCDPD.HostPresentationParameters.BackBufferHeight ||
-				 rtHeight * 2 == g_EmuCDPD.HostPresentationParameters.BackBufferHeight)) {
+			if (surf.clipWidth == g_EmuCDPD.HostPresentationParameters.BackBufferWidth &&
+				(surf.clipHeight == g_EmuCDPD.HostPresentationParameters.BackBufferHeight ||
+				 surf.clipHeight * 2 == g_EmuCDPD.HostPresentationParameters.BackBufferHeight)) {
 				g_PgraphBackBufferOffset = colorOffset;
 			}
 		}
@@ -952,10 +1074,10 @@ void CxbxD3D11UpdateRenderTargetFromPGRAPH(PGRAPHState *pg)
 					pHostDS->GetDesc(&dsDesc);
 					g_pD3DCurrentHostRenderTarget->GetDesc(&rtDesc);
 					if (dsDesc.Width != rtDesc.Width || dsDesc.Height != rtDesc.Height) {
-						// Unbind color RT — depth-only rendering
-						if (g_pD3DCurrentRTV && g_pD3DCurrentRTV != g_pD3DBackBufferView) {
-							g_pD3DCurrentRTV->Release();
-						}
+						// Unbind color RT — depth-only rendering.
+						// Do NOT release g_pD3DCurrentRTV: it's owned by g_RTVCache.
+						// Releasing here would leave a dangling pointer in the cache,
+						// causing use-after-free when the same RT is rebound later.
 						g_pD3DCurrentRTV = nullptr;
 						g_pD3DCurrentHostRenderTarget = nullptr;
 						unboundColorForDepthOnly = true;
@@ -1047,9 +1169,10 @@ HRESULT CxbxSetRenderTarget(ID3D11Texture2D* pHostRenderTarget, UINT mipSlice, U
 	CxbxMarkTextureSRVsDirty();
 	if (pHostRenderTarget == nullptr) {
 		g_pD3DCurrentHostRenderTarget = g_pD3DBackBufferSurface;
-		if (g_pD3DCurrentRTV != nullptr && g_pD3DCurrentRTV != g_pD3DBackBufferView) {
-			g_pD3DCurrentRTV->Release();
-		}
+		// Don't release g_pD3DCurrentRTV — it's either the default
+		// backbuffer view or a cached RTV (owned by g_RTVCache).
+		// Releasing here would leave a dangling pointer in the cache,
+		// causing use-after-free when the swap chain buffer rotates back.
 		g_pD3DCurrentRTV = g_pD3DBackBufferView;
 		g_pD3DDeviceContext->OMSetRenderTargets(1, &g_pD3DBackBufferView, g_pD3DDepthStencilView);
 		hRet = S_OK;

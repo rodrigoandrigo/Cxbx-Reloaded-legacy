@@ -30,14 +30,7 @@
 #include "windows.h"
 #include <Commctrl.h>
 #include <string>
-
-#define LIGHTGUN_NUM_BUTTONS 17
-#define XBOX_CTRL_NUM_BUTTONS 25
-#define SBC_NUM_BUTTONS 56
-#define HIGHEST_NUM_BUTTONS SBC_NUM_BUTTONS
-
-#define XBOX_BUTTON_NAME_LENGTH 30
-#define HOST_BUTTON_NAME_LENGTH 30
+#include "InputConstants.h"
 
 /* Represents the gui buttons of the xbox device currently being configured */
 class Button

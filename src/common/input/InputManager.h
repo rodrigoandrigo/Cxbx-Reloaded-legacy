@@ -30,7 +30,9 @@
 
 #include <thread>
 #include "InputDevice.h"
-#include "EmuDevice.h"
+#include "InputConstants.h"
+#include "common/util/CxbxUtil.h"
+#include "common/xbox_types.h"
 #include <imgui.h>
 
 #define PORT_INVALID     -1
@@ -206,11 +208,16 @@ struct DeviceState {
 
 extern DeviceState g_devs[MAX_DEVS];
 
+#if defined(CXBXR_UWP)
+using CxbxInputWindowHandle = void*;
+#else
+using CxbxInputWindowHandle = HWND;
+#endif
 
 class InputDeviceManager
 {
 public:
-	void Initialize(bool is_gui, HWND hwnd);
+	void Initialize(bool is_gui, CxbxInputWindowHandle hwnd);
 	void Shutdown();
 	// read/write the input/output from/to the device attached to the supplied xbox port
 	bool UpdateXboxPortInput(int port, void *buffer, int direction, int type);
@@ -265,7 +272,7 @@ private:
 	// used to indicate that the manager is shutting down
 	bool m_bPendingShutdown;
 	// handle of the rendering or the input gui window
-	HWND m_hwnd;
+	CxbxInputWindowHandle m_hwnd;
 };
 
 extern InputDeviceManager g_InputDeviceManager;

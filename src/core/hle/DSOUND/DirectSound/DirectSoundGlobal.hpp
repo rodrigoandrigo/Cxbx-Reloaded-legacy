@@ -24,7 +24,7 @@
 // ******************************************************************
 #pragma once
 
-#include <dsound.h>
+#include "core/hle/DSOUND/DsoundHostTypes.h"
 
 #include <thread>
 #include <mutex>
@@ -33,6 +33,7 @@
 #include "core/hle/D3D8/XbD3D8Types.h" // For D3D_OK
 #include "core/hle/DSOUND/DirectSound/DirectSound.hpp"
 #include "common/Settings.hpp"
+#include "core/hle/DSOUND/AudioScheduler.h"
 
 extern Settings::s_audio            g_XBAudio;
 extern std::recursive_mutex         g_DSoundMutex;
@@ -82,5 +83,3 @@ extern DsBufferStreaming g_dsBufferStreaming;
 extern void DirectSoundDoWork_Buffer(xbox::LARGE_INTEGER& time);
 extern void DirectSoundDoWork_Stream(xbox::LARGE_INTEGER& time);
 extern void dsound_async_worker();
-extern void dsound_worker();
-extern uint64_t dsound_next(uint64_t now);

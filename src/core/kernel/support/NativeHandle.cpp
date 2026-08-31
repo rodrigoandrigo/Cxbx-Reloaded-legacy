@@ -14,7 +14,7 @@
 // *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // *  GNU General Public License for more details.
 // *
-// *  You should have recieved a copy of the GNU General Public License
+// *  You should have received a copy of the GNU General Public License
 // *  along with this program; see the file COPYING.
 // *  If not, write to the Free Software Foundation, Inc.,
 // *  59 Temple Place - Suite 330, Bostom, MA 02111-1307, USA.
@@ -84,7 +84,8 @@ void AttachStringToXboxObject(xbox::PVOID xobject, const std::string& string)
 	}
 
 	using namespace xbox;
-	POBJECT_HEADER ObjectHeader = OBJECT_TO_OBJECT_HEADER(xobject);
+	POBJECT_HEADER ObjectHeader = reinterpret_cast<POBJECT_HEADER>(
+		reinterpret_cast<addr_xt>(xobject) - offsetof(OBJECT_HEADER, Body));
 	// Check if an object already has string.
 	if (ObjectHeader->Flags & OB_FLAG_NAMED_OBJECT) {
 		// Skip it.
@@ -311,9 +312,11 @@ static std::string DeviceObject2Str(xbox::PVOID xobject)
 static std::string NamedObject2Str(xbox::PVOID xobject)
 {
 	using namespace xbox;
-	xbox::POBJECT_HEADER ObjectHeader = OBJECT_TO_OBJECT_HEADER(xobject);
+	xbox::POBJECT_HEADER ObjectHeader = reinterpret_cast<xbox::POBJECT_HEADER>(
+		reinterpret_cast<xbox::addr_xt>(xobject) - offsetof(xbox::OBJECT_HEADER, Body));
 	if (ObjectHeader->Flags & OB_FLAG_NAMED_OBJECT) {
-		xbox::POBJECT_HEADER_NAME_INFO ObjectNameInfo = OBJECT_TO_OBJECT_HEADER_NAME_INFO(xobject);
+		xbox::POBJECT_HEADER_NAME_INFO ObjectNameInfo = reinterpret_cast<xbox::POBJECT_HEADER_NAME_INFO>(
+			reinterpret_cast<xbox::addr_xt>(ObjectHeader) - sizeof(xbox::OBJECT_HEADER_NAME_INFO));
 		return std::string(ObjectNameInfo->Name.Buffer, ObjectNameInfo->Name.Length);
 	}
 

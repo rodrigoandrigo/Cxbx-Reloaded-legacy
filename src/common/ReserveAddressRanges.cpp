@@ -41,6 +41,30 @@
 #include "ReserveAddressRanges.h"
 #include "AddressRanges.h"
 
+static HANDLE CreateAnonymousMemoryMapping(SIZE_T size)
+{
+#if defined(CXBXR_UWP)
+	return CreateFileMappingFromApp(INVALID_HANDLE_VALUE, nullptr,
+		PAGE_EXECUTE_READWRITE, size, nullptr);
+#else
+	return CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
+		PAGE_EXECUTE_READWRITE, 0, static_cast<DWORD>(size), nullptr);
+#endif
+}
+
+static LPVOID MapMemoryViewAt(HANDLE mapping, uint32_t start, SIZE_T size, bool executable)
+{
+#if defined(CXBXR_UWP)
+	return MapViewOfFile3FromApp(mapping, nullptr,
+		reinterpret_cast<LPVOID>(static_cast<uintptr_t>(start)), 0, size, 0,
+		executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, nullptr, 0);
+#else
+	return MapViewOfFileEx(mapping,
+		executable ? (FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE) : (FILE_MAP_READ | FILE_MAP_WRITE),
+		0, 0, size, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(start)));
+#endif
+}
+
 // Reserve an address range up to the extend of what the host allows.
 bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 {
@@ -91,13 +115,7 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 	} else
 	switch (Start) {
 		case PHYSICAL_MAP1_BASE:
-			hFileMapping1 = CreateFileMapping(
-				INVALID_HANDLE_VALUE,
-				nullptr,
-				PAGE_EXECUTE_READWRITE,
-				0,
-				Size,
-				nullptr);
+			hFileMapping1 = CreateAnonymousMemoryMapping(Size);
 			if (hFileMapping1 == nullptr) {
 				HadAnyFailure = true;
 				break;
@@ -109,13 +127,7 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 			static bool NeedsInitializationMap = true;
 
 			if (NeedsInitializationMap) {
-				hFileMapping2 = CreateFileMapping(
-					INVALID_HANDLE_VALUE,
-					nullptr,
-					PAGE_EXECUTE_READWRITE,
-					0,
-					Size,
-					nullptr);
+				hFileMapping2 = CreateAnonymousMemoryMapping(Size);
 				if (hFileMapping2 == nullptr) {
 					HadAnyFailure = true;
 					break;
@@ -123,14 +135,11 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 				NeedsInitializationMap = false;
 			}
 
-			LPVOID Result = MapViewOfFileEx(
+			LPVOID Result = MapMemoryViewAt(
 				(Start == PHYSICAL_MAP1_BASE || Start == TILED_MEMORY_BASE) ? hFileMapping1 : hFileMapping2,
-				(Start == PHYSICAL_MAP1_BASE || Start == PHYSICAL_MAP2_BASE) ?
-				(FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE) : (FILE_MAP_READ | FILE_MAP_WRITE),
-				0,
-				0,
+				Start,
 				Size,
-				(LPVOID)Start);
+				(Start == PHYSICAL_MAP1_BASE || Start == PHYSICAL_MAP2_BASE));
 #ifdef DEBUG
 			std::printf("     : MapViewOfFile; Start = 0x%08X; Result = %p\n", Start, Result);
 #endif

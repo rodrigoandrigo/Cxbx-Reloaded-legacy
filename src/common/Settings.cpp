@@ -38,9 +38,9 @@
 #include "common/util/cliConfig.hpp"
 
 // TODO: Implement Qt support when real CPU emulation is available.
-#ifndef QT_VERSION // NOTE: Non-Qt will be using current directory for data
+#if !defined(QT_VERSION) && !defined(CXBXR_UWP) // NOTE: Non-Qt desktop build
 #include <ShlObj.h> // For SHGetSpecialFolderPath and CSIDL_APPDATA
-#else
+#elif defined(QT_VERSION)
 static_assert(false, "Please implement support for cross-platform's user profile data.");
 
 #include <QDir> // for create directory
@@ -178,7 +178,15 @@ std::string GenerateExecDirectoryStr()
 {
 	std::string exec_path;
 	(void)cli_config::GetValue(cli_config::exec, &exec_path);
-	return exec_path.substr(0, exec_path.find_last_of("\\/"));
+	auto pos = exec_path.find_last_of("\\/");
+	if (pos != std::string::npos) {
+		return exec_path.substr(0, pos);
+	}
+	// No path separator — resolve relative to the actual module path
+	char modulePath[MAX_PATH];
+	GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
+	std::string fullPath(modulePath);
+	return fullPath.substr(0, fullPath.find_last_of("\\/"));
 }
 
 // NOTE: This function will be only have Qt support, std::filesystem doesn't have generic support.
@@ -190,8 +198,16 @@ std::string GenerateUserProfileDirectoryStr()
 	// with QStandardPaths::GenericDataLocation for generic User Profile location.
 	// NOTE: LibRetro compile build will not have user profile option support.
 	// ========================================================
-	char folderOption[MAX_PATH];
+	char folderOption[MAX_PATH]{};
 	std::string genDirectory;
+#if defined(CXBXR_UWP)
+	// The UWP host supplies ApplicationData::LocalFolder through the embedding
+	// config. Never rediscover it through desktop shell APIs.
+	if (g_EmuShared) {
+		g_EmuShared->GetDataLocation(folderOption);
+	}
+	return folderOption;
+#else
 	// TODO: Use QDir and QStandardPaths::GenericDataLocation for get user profile directory to support cross-platform
 	BOOL bRet = SHGetSpecialFolderPathA(NULL, folderOption, CSIDL_APPDATA, TRUE); // NOTE: Windows only support
 	if (!bRet) {
@@ -201,6 +217,7 @@ std::string GenerateUserProfileDirectoryStr()
 	genDirectory.append(szSettings_cxbx_reloaded_directory);
 
 	return genDirectory;
+#endif
 }
 
 std::string TrimQuoteFromString(const char* data)
@@ -970,7 +987,8 @@ CXBX_DATA Settings::SetupFile(std::string& file_path_out)
 			// Check if data directory exists.
 			if (!std::filesystem::exists(setupFile)) {
 				// Then try create data directory.
-				if (!std::filesystem::create_directory(setupFile)) {
+				std::error_code ec;
+				if (!std::filesystem::create_directory(setupFile, ec)) {
 					// Unable to create a data directory
 					data_ret = CXBX_DATA_INVALID;
 				}

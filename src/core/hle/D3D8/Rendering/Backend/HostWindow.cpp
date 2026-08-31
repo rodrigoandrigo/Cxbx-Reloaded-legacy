@@ -23,6 +23,7 @@
 // *
 // ******************************************************************
 #include "../EmuD3D8_common.h"
+#include "common/cxbxr.hpp"
 
 
 void RunOnWndMsgThread(const std::function<void()>& func)
@@ -75,9 +76,7 @@ void CxbxInitWindow()
 		if (hRenderWindowThread == NULL) {
 			char szBuffer[1024] = { 0 };
 			sprintf(szBuffer, "Creating EmuRenderWindowThread Failed: %08X", GetLastError());
-			PopupFatal(nullptr, szBuffer);
-			EmuShared::Cleanup();
-			ExitProcess(0);
+			CxbxrAbortEx(CXBXR_MODULE::D3D8, "%s", szBuffer);
 		}
 		g_AffinityPolicy->SetAffinityOther(hRenderWindowThread);
 
@@ -192,4 +191,3 @@ void CxbxUpdateCursor(bool forceShow) {
 		}
 	}
 }
-

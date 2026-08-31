@@ -18,15 +18,30 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "common/CxbxEmbedRuntime.h"
+
 static void error_exit(int err, const char *msg)
 {
     char *pstr;
 
     FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER,
                   NULL, err, 0, (LPTSTR)&pstr, 2, NULL);
+    if (CxbxEmbedRuntimeIsActive()) {
+        CxbxEmbedRuntimeReportError(CXBX_EMBED_LAUNCH_FAILED, msg);
+        CxbxEmbedRuntimeRequestStop();
+        LocalFree(pstr);
+        throw CxbxEmbeddedAbort(msg);
+    }
+#if defined(CXBXR_UWP)
+    CxbxEmbedRuntimeReportError(CXBX_EMBED_LAUNCH_FAILED, msg);
+    CxbxEmbedRuntimeRequestStop();
+    LocalFree(pstr);
+    throw CxbxEmbeddedAbort(msg);
+#else
     fprintf(stderr, "qemu: %s: %s\n", msg, pstr);
     LocalFree(pstr);
     abort();
+#endif
 }
 
 void qemu_mutex_init(QemuMutex *mutex)
@@ -194,6 +209,46 @@ void qemu_cond_wait(QemuCond *cond, QemuMutex *mutex)
     qemu_mutex_lock(mutex);
 }
 
+bool qemu_cond_timedwait(QemuCond *cond, QemuMutex *mutex, unsigned int ms)
+{
+    /*
+     * This access is protected under the mutex.
+     */
+    cond->waiters++;
+
+    qemu_mutex_unlock(mutex);
+    DWORD result = WaitForSingleObject(cond->sema, (DWORD)ms);
+
+    if (result == WAIT_TIMEOUT) {
+        /*
+         * Check if a signal arrived between the timeout and now.
+         * This handles the race where the signaler released the semaphore
+         * just as our timed wait expired.
+         */
+        result = WaitForSingleObject(cond->sema, 0);
+        if (result == WAIT_TIMEOUT) {
+            /*
+             * Truly timed out — no signal was released for us.
+             * Safe to decrement waiters because the signaling thread
+             * checks waiters under the external mutex, which we will
+             * re-acquire below. With a single waiter (our use case),
+             * no signaler can be stuck in continue_event wait.
+             */
+            InterlockedDecrement(&cond->waiters);
+            qemu_mutex_lock(mutex);
+            return true;
+        }
+        /* Signal arrived just after timeout — fall through to normal wake */
+    }
+
+    if (InterlockedDecrement(&cond->waiters) == cond->target) {
+        SetEvent(cond->continue_event);
+    }
+
+    qemu_mutex_lock(mutex);
+    return false;
+}
+
 void qemu_sem_init(QemuSemaphore *sem, int init)
 {
     /* Manual reset.  */
@@ -281,7 +336,7 @@ static unsigned __stdcall win32_start_routine(void *arg)
     }
     qemu_thread_data = data;
     qemu_thread_exit(start_routine(thread_arg));
-    abort();
+    return 0;
 }
 
 void qemu_thread_exit(void *arg)

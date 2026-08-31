@@ -47,12 +47,12 @@ void CxbxrUnlockFilePath();
 // Hybrid functions depending on specific platforms
 bool CxbxrIsElevated();
 
-std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess);
+std::optional<std::string> CxbxrExec(bool useDebugger, void** hProcess, bool requestHandleProcess, bool isReboot = false);
 
 /*! cleanup emulation */
 [[noreturn]] void CxbxrAbortEx(CXBXR_MODULE cxbxr_module, const char* szErrorMessage, ...);
 
 #define CxbxrAbort(fmt, ...) CxbxrAbortEx(LOG_PREFIX, fmt, ##__VA_ARGS__)
 
-/*! terminate gracefully the emulation */
-[[noreturn]] void CxbxrShutDown(bool is_reboot = false);
+/*! terminate gracefully the emulation. Embedded hosts retain process ownership. */
+void CxbxrShutDown(bool is_reboot = false);

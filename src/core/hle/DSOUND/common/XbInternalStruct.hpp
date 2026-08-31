@@ -28,6 +28,12 @@
 #include "core\hle\DSOUND\XbDSoundTypes.h"
 #include "common/audio/converter.hpp"
 
+#if defined(CXBXR_UWP)
+# define CXBX_AUDIO_LAYOUT_ASSERT(...) static_assert(true)
+#else
+# define CXBX_AUDIO_LAYOUT_ASSERT(...) static_assert(__VA_ARGS__)
+#endif
+
 namespace xbox {
 
 // TODO: Everything, only small portions had been implemented.
@@ -58,7 +64,7 @@ struct CUnknownGenericManager {
     uint32_t ref_count;                                     // 0x04
 };
 // Require to verify there is no other unknown additional data by compiler itself.
-static_assert(sizeof(CUnknownGenericManager) == 0x08);
+CXBX_AUDIO_LAYOUT_ASSERT(sizeof(CUnknownGenericManager) == 0x08);
 
 struct CUnknownTemplate {
     // construct vtable (or grab ptr to existing)
@@ -76,7 +82,7 @@ struct CUnknownTemplate {
     uint32_t ref_count;                                     // 0x04
 };
 // Require to verify there is no other unknown additional data by compiler itself.
-static_assert(sizeof(CUnknownTemplate) == 0x08);
+CXBX_AUDIO_LAYOUT_ASSERT(sizeof(CUnknownTemplate) == 0x08);
 
 struct CMcpxVoiceClient: CUnknownTemplate {
     CMcpxVoiceClient() : settings(default_settings) {};
@@ -94,7 +100,7 @@ struct CMcpxVoiceClient: CUnknownTemplate {
     static _settings default_settings;
 };
 // Require to verify there is no other unknown additional data by compiler itself.
-static_assert(sizeof(CMcpxVoiceClient) == 0x300);
+CXBX_AUDIO_LAYOUT_ASSERT(sizeof(CMcpxVoiceClient) == 0x300);
 
 struct CDirectSoundVoice : CUnknownGenericManager {
     CDirectSoundVoice(bool is3D);
@@ -143,7 +149,7 @@ struct CDirectSoundVoice : CUnknownGenericManager {
             uint32_t                unknown_24[(0x300 - 0x24) / 4]; // 0x024 - 0x300 (unknown size, likely over 0x200 size.
         } r4134_upper;
     } settings;
-    static_assert(sizeof(_settings) == 0x300); // Not really require
+    CXBX_AUDIO_LAYOUT_ASSERT(sizeof(_settings) == 0x300); // Not really require
 
     // Generic interface without need to check xdk's build revision every time.
     typedef audio_format    (*pGetFormat)(_settings& settings);
@@ -163,7 +169,7 @@ struct CDirectSoundVoice : CUnknownGenericManager {
         pGetUint32          GetHeadroom;
         pSetUint32          SetHeadroom;
     } funcs;
-    static_assert(sizeof(funcs) == 0x24); // Not really require
+    CXBX_AUDIO_LAYOUT_ASSERT(sizeof(funcs) == 0x24); // Not really require
 
     inline audio_format GetFormat() {
         return funcs.GetFormat(settings);
@@ -194,7 +200,7 @@ struct CDirectSoundVoice : CUnknownGenericManager {
     };
 };
 // Require to verify there is no other unknown additional data by compiler itself.
-static_assert(sizeof(CDirectSoundVoice) == sizeof(CUnknownGenericManager) + sizeof(CDirectSoundVoice::_settings) + sizeof(CDirectSoundVoice::funcs));
+CXBX_AUDIO_LAYOUT_ASSERT(sizeof(CDirectSoundVoice) == sizeof(CUnknownGenericManager) + sizeof(CDirectSoundVoice::_settings) + sizeof(CDirectSoundVoice::funcs));
 
 struct DSBUFFER_S : CUnknownTemplate {
 
@@ -206,7 +212,7 @@ struct DSBUFFER_S : CUnknownTemplate {
         xbox::addr_xt          p_unknown_14;                   // Offset 0x14 // -0x08 // (points to this address)
         xbox::addr_xt          p_unknown_18;                   // Offset 0x18 // -0x04 // (points to above address)
     } dsb_c;
-    static_assert(sizeof(DSBUFFER_C) == 0x14);
+    CXBX_AUDIO_LAYOUT_ASSERT(sizeof(DSBUFFER_C) == 0x14);
 
     struct DSBUFFER_I {
         CDirectSoundVoice*  p_CDSVoice;                     // Offset 0x1C //  0x00 // Same as p_CDSVoice (above); pThis
@@ -216,7 +222,7 @@ struct DSBUFFER_S : CUnknownTemplate {
         uint32_t            unknown_2C;                     // Offset 0x2C //  0x10 // was integer, later shift to offset 0x30
         uint32_t            unknown_30;                     // Offset 0x30 //  0x14 // later shifted from offset 0x2C; integer
     } dsb_i;
-    static_assert(sizeof(DSBUFFER_I) == 0x18);
+    CXBX_AUDIO_LAYOUT_ASSERT(sizeof(DSBUFFER_I) == 0x18);
 
     DSBUFFER_S(bool is3D) {
         init(is3D);
@@ -241,6 +247,6 @@ struct DSBUFFER_S : CUnknownTemplate {
     }
 };
 // Require to verify there is no other unknown additional data by compiler itself.
-static_assert(sizeof(DSBUFFER_S) == 0x34);
+CXBX_AUDIO_LAYOUT_ASSERT(sizeof(DSBUFFER_S) == 0x34);
 
 }

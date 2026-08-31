@@ -27,6 +27,13 @@
 
 void CxbxImGui_RenderD3D(ImGuiUI* m_imgui, ID3D11Texture2D* renderTarget)
 {
+#if defined(CXBXR_UWP)
+	// The UWP host owns input and UI composition; the embedded core has no
+	// HWND-backed ImGui overlay.
+	(void)m_imgui;
+	(void)renderTarget;
+	return;
+#else
 	ImGui_ImplDX11_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
@@ -43,4 +50,5 @@ void CxbxImGui_RenderD3D(ImGuiUI* m_imgui, ID3D11Texture2D* renderTarget)
 		ImGui_ImplDX11_RenderDrawData(drawData);
 		(void)CxbxSetRenderTarget(nullptr);
 	}
+#endif
 }

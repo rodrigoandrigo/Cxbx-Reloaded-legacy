@@ -17,6 +17,10 @@ add_compile_definitions(
  LTC_NO_PROTOTYPES
 )
 
+if(CXBXR_UWP_CORE)
+ add_compile_definitions(ARGTYPE=4)
+endif()
+
 file (GLOB HEADERS
  "${CXBXR_ROOT_DIR}/import/libtomcrypt/src/headers/tomcrypt.h"
  "${CXBXR_ROOT_DIR}/import/libtomcrypt/src/headers/tomcrypt_argchk.h"

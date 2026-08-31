@@ -26,6 +26,7 @@
 #define EMUX86_H
 
 #include "Cxbx.h"
+#include "common/xbox_types.h"
 #include <cstdint>
 #include <windows.h>
 

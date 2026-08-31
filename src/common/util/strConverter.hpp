@@ -26,7 +26,11 @@
 
 #include <string>
 #include <cstring>
+#if defined(CXBXR_UWP)
+#include <SDL3/SDL_stdinc.h>
+#else
 #include <SDL_stdinc.h>
+#endif
 
 // Depending on what type of UTF-8 string is input, otherwise will use native by default.
 static std::wstring utf8_to_utf16(const char* utf8_string)

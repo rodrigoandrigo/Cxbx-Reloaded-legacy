@@ -2,6 +2,17 @@ cmake_minimum_required (VERSION 3.12)
 
 project(Cxbx-Reloaded)
 
+option(CXBXR_UWP_CORE "Build the embedding core against the UWP Win32 API contract" OFF)
+set(CXBXR_SDL3_UWP_DIR "C:/Users/rodri/Dev1/Projetos/SDL3-uwp" CACHE PATH
+ "Path to the SDL3 UWP source tree used by the UWP core")
+
+if(CXBXR_UWP_CORE AND NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+ message(FATAL_ERROR
+  "CXBXR_UWP_CORE must be configured with the UWP toolchain. Use "
+  "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/uwp.cmake "
+  "in a fresh build directory.")
+endif()
+
 # Allow devs to disable regeneration option.
 # Suppress extra stuff from generated solution
 #set(CMAKE_SUPPRESS_REGENERATION true)
@@ -13,14 +24,35 @@ endif()
 
 set(SUBHOOK_TESTS OFF)
 set(SUBHOOK_INSTALL OFF)
+if(CXBXR_UWP_CORE)
+ set(SUBHOOK_STATIC ON CACHE BOOL "Link subhook into the UWP core" FORCE)
+endif()
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/subhook" EXCLUDE_FROM_ALL)
+if(CXBXR_UWP_CORE)
+ target_compile_definitions(subhook PRIVATE WINAPI_FAMILY=WINAPI_FAMILY_APP)
+endif()
 
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/XbSymbolDatabase")
 
 # Not require since only include a header file
 #add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/simpleini")
 
-add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/SDL2" EXCLUDE_FROM_ALL)
+if(CXBXR_UWP_CORE)
+ if(NOT EXISTS "${CXBXR_SDL3_UWP_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR "CXBXR_UWP_CORE requires SDL3-UWP at ${CXBXR_SDL3_UWP_DIR}")
+ endif()
+ # SDL3-UWP selects its WinRT sources from WINDOWS_STORE and does not link the
+ # desktop Windows library set in that configuration.
+ set(WINDOWS_STORE ON CACHE BOOL "Build SDL3 for the UWP API family" FORCE)
+ set(SDL_CEMU_UWP ON CACHE BOOL "Use SDL3's embedded Windows.Gaming.Input backend" FORCE)
+ set(SDL_SHARED OFF CACHE BOOL "Do not build SDL3 shared library" FORCE)
+ set(SDL_STATIC ON CACHE BOOL "Build SDL3 static library" FORCE)
+ set(SDL_TEST_LIBRARY OFF CACHE BOOL "Do not build SDL3 test library" FORCE)
+ set(SDL_TESTS OFF CACHE BOOL "Do not build SDL3 tests" FORCE)
+ add_subdirectory("${CXBXR_SDL3_UWP_DIR}" "${CMAKE_BINARY_DIR}/SDL3-uwp" EXCLUDE_FROM_ALL)
+else()
+ add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/SDL2" EXCLUDE_FROM_ALL)
+endif()
 
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/import/mio" EXCLUDE_FROM_ALL)
 
@@ -66,6 +98,7 @@ file (GLOB CXBXR_HEADER_COMMON
  "${CXBXR_ROOT_DIR}/src/common/crypto/EmuSha.h"
  "${CXBXR_ROOT_DIR}/src/common/crypto/LibRc4.h"
  "${CXBXR_ROOT_DIR}/src/common/CxbxDebugger.h"
+ "${CXBXR_ROOT_DIR}/src/common/CxbxEmbedStorage.h"
  "${CXBXR_ROOT_DIR}/src/common/cxbxr.hpp"
  "${CXBXR_ROOT_DIR}/src/common/EmuEEPROM.h"
  "${CXBXR_ROOT_DIR}/src/common/Error.h"
@@ -260,6 +293,8 @@ file (GLOB CXBXR_HEADER_EMU
  "${CXBXR_ROOT_DIR}/src/devices/video/swizzle.h"
  "${CXBXR_ROOT_DIR}/src/devices/video/vga.h"
  "${CXBXR_ROOT_DIR}/src/devices/x86/EmuX86.h"
+ "${CXBXR_ROOT_DIR}/src/devices/x86/CxbxCpuBackend.h"
+ "${CXBXR_ROOT_DIR}/src/devices/x86/CxbxCpuBackendLoader.h"
  "${CXBXR_ROOT_DIR}/src/devices/Xbox.h"
 )
 
@@ -276,6 +311,8 @@ file (GLOB CXBXR_SOURCE_COMMON
  "${CXBXR_ROOT_DIR}/src/common/crypto/EmuSha.cpp"
  "${CXBXR_ROOT_DIR}/src/common/crypto/LibRc4.cpp"
  "${CXBXR_ROOT_DIR}/src/common/CxbxDebugger.cpp"
+ "${CXBXR_ROOT_DIR}/src/common/CxbxEmbedRuntime.cpp"
+ "${CXBXR_ROOT_DIR}/src/common/CxbxEmbedStorage.cpp"
  "${CXBXR_ROOT_DIR}/src/common/cxbxr.cpp"
  "${CXBXR_ROOT_DIR}/src/common/EmuEEPROM.cpp"
  "${CXBXR_ROOT_DIR}/src/common/Error.cpp"
@@ -316,6 +353,17 @@ file (GLOB CXBXR_SOURCE_COMMON
  "${CXBXR_ROOT_DIR}/src/HighPerformanceGraphicsEnabler.c"
 )
 
+# UWP input comes from SDL3's WinRT/WGI backend. DirectInput, Raw Input,
+# XInput and libusb are desktop transports and must not enter AppContainer.
+if(CXBXR_UWP_CORE)
+ list(REMOVE_ITEM CXBXR_SOURCE_COMMON
+  "${CXBXR_ROOT_DIR}/src/common/input/DInputKeyboardMouse.cpp"
+  "${CXBXR_ROOT_DIR}/src/common/input/LibusbDevice.cpp"
+  "${CXBXR_ROOT_DIR}/src/common/input/RawDevice.cpp"
+  "${CXBXR_ROOT_DIR}/src/common/input/XInputPad.cpp"
+ )
+endif()
+
 # GUI v1
 file (GLOB CXBXR_SOURCE_GUIv1
  "${CXBXR_ROOT_DIR}/src/common/input/Button.cpp"
@@ -346,6 +394,12 @@ file (GLOB CXBXR_SOURCE_EMU_IMPORT
  "${IMGUI_GFX_SOURCE}"
  "${CXBXR_ROOT_DIR}/import/imgui/backends/imgui_impl_win32.cpp"
 )
+
+if(CXBXR_UWP_CORE)
+ list(REMOVE_ITEM CXBXR_SOURCE_EMU_IMPORT
+  "${CXBXR_ROOT_DIR}/import/imgui/backends/imgui_impl_win32.cpp"
+ )
+endif()
 file (GLOB CXBXR_SOURCE_EMU
  "${CXBXR_KRNL_CPP}"
  "${CXBXR_ROOT_DIR}/src/common/Timer.cpp"
@@ -475,6 +529,7 @@ file (GLOB CXBXR_SOURCE_EMU
  "${CXBXR_ROOT_DIR}/src/devices/video/qemu-thread-win32.cpp"
  "${CXBXR_ROOT_DIR}/src/devices/video/swizzle.cpp"
  "${CXBXR_ROOT_DIR}/src/devices/x86/EmuX86.cpp"
+ "${CXBXR_ROOT_DIR}/src/devices/x86/CxbxCpuBackendLoader.cpp"
  "${CXBXR_ROOT_DIR}/src/devices/Xbox.cpp"
  # Temporary usage for need ReserveAddressRanges func with cxbx.exe's emulation.
  "${CXBXR_ROOT_DIR}/src/common/ReserveAddressRanges.cpp"
@@ -488,16 +543,23 @@ set(BUILD_CXBXR_DEBUGGER OFF)
 # Set shader output directory early so cxbxr-emu can find it during configure
 set(CXBXR_SHADER_GEN_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/shaders" CACHE INTERNAL "")
 
-add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/projects/cxbx")
-
-add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/projects/cxbxr-ldr")
+if(NOT CXBXR_UWP_CORE)
+ add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/projects/cxbx")
+ add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/projects/cxbxr-ldr")
+endif()
 
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/projects/cxbxr-emu")
 
 set(cxbxr_INSTALL_files "COPYING" "README.md")
 
 # Cxbx-Reloaded project with third-party libraries
-set_target_properties(cxbx cxbxr-ldr cxbxr-emu misc-batch SDL2 subhook libXbSymbolDatabase libtommath libtomcrypt imgui libusb
+set(CXBXR_FOLDER_TARGETS cxbxr-emu misc-batch subhook libXbSymbolDatabase libtommath libtomcrypt imgui libusb)
+if(CXBXR_UWP_CORE)
+ list(APPEND CXBXR_FOLDER_TARGETS SDL3-static)
+else()
+ list(APPEND CXBXR_FOLDER_TARGETS cxbx cxbxr-ldr SDL2)
+endif()
+set_target_properties(${CXBXR_FOLDER_TARGETS}
  PROPERTIES FOLDER Cxbx-Reloaded
 )
 
@@ -507,7 +569,11 @@ set_target_properties(nv2a_vsh_emulator nv2a_vsh_disassembler nv2a_vsh_cpu
 
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
  # Configure startup project
- set_property(DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" PROPERTY VS_STARTUP_PROJECT cxbx)
+ if(CXBXR_UWP_CORE)
+  set_property(DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" PROPERTY VS_STARTUP_PROJECT cxbxr-emu)
+ else()
+  set_property(DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" PROPERTY VS_STARTUP_PROJECT cxbx)
+ endif()
 endif()
 
 # Check if generator is Visual Studio then enable Cxbxr-Debugger project.
@@ -714,10 +780,11 @@ endfunction()
 add_custom_target(compile-shaders ALL DEPENDS ${CSO_HEADERS})
 set_target_properties(compile-shaders PROPERTIES FOLDER "Cxbx-Reloaded/tools")
 
-install(PROGRAMS $<TARGET_FILE_DIR:cxbx>/${CMAKE_SHARED_LIBRARY_PREFIX}subhook${CMAKE_SHARED_LIBRARY_SUFFIX}
-  DESTINATION bin
-)
-
-install(PROGRAMS $<TARGET_FILE_DIR:cxbx>/${CMAKE_SHARED_LIBRARY_PREFIX}SDL2${CMAKE_SHARED_LIBRARY_SUFFIX}
-  DESTINATION bin
-)
+if(NOT CXBXR_UWP_CORE)
+ install(PROGRAMS $<TARGET_FILE_DIR:cxbx>/${CMAKE_SHARED_LIBRARY_PREFIX}subhook${CMAKE_SHARED_LIBRARY_SUFFIX}
+   DESTINATION bin
+ )
+ install(PROGRAMS $<TARGET_FILE_DIR:cxbx>/${CMAKE_SHARED_LIBRARY_PREFIX}SDL2${CMAKE_SHARED_LIBRARY_SUFFIX}
+   DESTINATION bin
+ )
+endif()
