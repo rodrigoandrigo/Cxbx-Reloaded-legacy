@@ -123,8 +123,12 @@ static bool RegisterIoCompletionWait(IoCompletionWaitContext* ctx)
 #endif
 }
 
-// Prevent setting the system time from multiple threads at the same time
+// Prevent setting the system time from multiple threads at the same time.
+#if defined(CXBXR_UWP)
+xbox::PRTL_CRITICAL_SECTION xbox::NtSystemTimeCritSecPointer = xbox::zeroptr;
+#else
 xbox::RTL_CRITICAL_SECTION xbox::NtSystemTimeCritSec;
+#endif
 
 // ******************************************************************
 // * KeRemoveQueueApc - Remove an APC from its thread's APC queue
@@ -354,12 +358,37 @@ XBSYSAPI EXPORTNUM(188) xbox::ntstatus_xt NTAPI xbox::NtCreateDirectoryObject
 		LOG_FUNC_ARG(ObjectAttributes)
 		LOG_FUNC_END;
 
-	POBJECT_DIRECTORY directoryObject;
-	ntstatus_xt status = ObCreateObject(&ObDirectoryObjectType, ObjectAttributes, sizeof(OBJECT_DIRECTORY), reinterpret_cast<PVOID *>(&directoryObject));
+	POBJECT_DIRECTORY directoryObject = zeroptr;
+#if defined(CXBXR_UWP)
+	GuestAllocation<PVOID> directoryObjectAllocation;
+	auto directoryObjectResult = directoryObjectAllocation.get();
+	if (!directoryObjectResult) {
+		RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
+	}
+#else
+	auto directoryObjectResult = reinterpret_cast<PVOID *>(&directoryObject);
+#endif
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: creating directory object body");
+#endif
+	ntstatus_xt status = ObCreateObject(&ObDirectoryObjectType, ObjectAttributes,
+		sizeof(OBJECT_DIRECTORY), directoryObjectResult);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: ObCreateObject returned 0x%08X", status);
+	if (X_NT_SUCCESS(status)) {
+		directoryObject = reinterpret_cast<POBJECT_DIRECTORY>(*directoryObjectResult);
+	}
+#endif
 
 	if (X_NT_SUCCESS(status)) {
 		std::memset(directoryObject, 0, sizeof(OBJECT_DIRECTORY));
+#if defined(CXBXR_UWP)
+		EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: inserting directory object");
+#endif
 		status = ObInsertObject(directoryObject, ObjectAttributes, 0, DirectoryHandle);
+#if defined(CXBXR_UWP)
+		EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: ObInsertObject returned 0x%08X", status);
+#endif
 	}
 
 	RETURN(status);
@@ -2840,7 +2869,7 @@ XBSYSAPI EXPORTNUM(228) xbox::ntstatus_xt NTAPI xbox::NtSetSystemTime
 		ret = STATUS_ACCESS_VIOLATION;
 	}
 	else {
-		RtlEnterCriticalSectionAndRegion(&NtSystemTimeCritSec);
+		RtlEnterCriticalSectionAndRegion(NtSystemTimeCritSecAddress());
 		NewSystemTime = *SystemTime;
 		if (NewSystemTime.u.HighPart > 0 && NewSystemTime.u.HighPart <= 0x20000000) {
 			/* Convert the time and set it in HAL */
@@ -2860,7 +2889,7 @@ XBSYSAPI EXPORTNUM(228) xbox::ntstatus_xt NTAPI xbox::NtSetSystemTime
 		else {
 			ret = STATUS_INVALID_PARAMETER;
 		}
-		RtlLeaveCriticalSectionAndRegion(&NtSystemTimeCritSec);
+		RtlLeaveCriticalSectionAndRegion(NtSystemTimeCritSecAddress());
 	}
 
 	RETURN(ret);

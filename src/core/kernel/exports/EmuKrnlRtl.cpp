@@ -33,6 +33,7 @@
 #include <core\kernel\exports\xboxkrnl.h> // For RtlAnsiStringToUnicodeString, etc.
 #include "Logging.h" // For LOG_FUNC()
 #include "EmuKrnlLogging.h"
+#include "core/kernel/memory-manager/VMManager.h"
 
 // prevent name collisions
 namespace NtDll
@@ -92,7 +93,19 @@ xbox::boolean_xt RtlpCaptureStackLimits(
 
 xbox::void_xt xbox::RtlInitSystem()
 {
-	xbox::RtlInitializeCriticalSection(&NtSystemTimeCritSec);
+#if defined(CXBXR_UWP)
+	const auto criticalSectionAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+		sizeof(xbox::RTL_CRITICAL_SECTION), false);
+	if (criticalSectionAddress == 0) {
+		CxbxrAbort("RtlInitSystem: unable to allocate guest system-time critical section");
+		return;
+	}
+	NtSystemTimeCritSecPointer = reinterpret_cast<PRTL_CRITICAL_SECTION>(
+		criticalSectionAddress);
+	std::memset(NtSystemTimeCritSecAddress(), 0, sizeof(RTL_CRITICAL_SECTION));
+#endif
+	xbox::RtlInitializeCriticalSection(NtSystemTimeCritSecAddress());
 }
 
 // ******************************************************************
@@ -1184,6 +1197,37 @@ XBSYSAPI EXPORTNUM(289) xbox::void_xt NTAPI xbox::RtlInitAnsiString
 	else {
 		DestinationString->Length = DestinationString->MaximumLength = 0;
 	}
+}
+
+void xbox::RtlInitAnsiStringHost(ANSI_STRING& DestinationString, const char* SourceString)
+{
+	if (SourceString == nullptr) {
+		DestinationString.Buffer = zeroptr;
+		DestinationString.Length = 0;
+		DestinationString.MaximumLength = 0;
+		return;
+	}
+
+	const size_t sourceLength = std::strlen(SourceString);
+	if (sourceLength >= USHRT_MAX) {
+		CxbxrAbort("RtlInitAnsiStringHost: source string is too long");
+		return;
+	}
+
+#if defined(CXBXR_UWP)
+	PCHAR guestBuffer = static_cast<PCHAR>(
+		ExAllocatePoolWithTag(sourceLength + 1, 'sAtR'));
+	if (guestBuffer == nullptr) {
+		CxbxrAbort("RtlInitAnsiStringHost: unable to allocate guest string");
+		return;
+	}
+	std::memcpy(guestBuffer, SourceString, sourceLength + 1);
+	DestinationString.Buffer = guestBuffer;
+#else
+	DestinationString.Buffer = const_cast<PCHAR>(SourceString);
+#endif
+	DestinationString.Length = static_cast<ushort_xt>(sourceLength);
+	DestinationString.MaximumLength = static_cast<ushort_xt>(sourceLength + 1);
 }
 
 // ******************************************************************

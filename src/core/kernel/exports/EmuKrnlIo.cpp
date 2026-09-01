@@ -432,7 +432,20 @@ XBSYSAPI EXPORTNUM(65) xbox::ntstatus_xt NTAPI xbox::IoCreateDevice
 
 		/* Insert the Object */
 		xbox::HANDLE handle;
+		#if defined(CXBXR_UWP)
+		auto guestHandle = static_cast<PHANDLE>(
+			ExAllocatePoolWithTag(sizeof(HANDLE), 'hDvI'));
+		if (guestHandle == nullptr) {
+			result = X_STATUS_INSUFFICIENT_RESOURCES;
+		}
+		else {
+			result = ObInsertObject(CreatedDeviceObject, &ObjectAttributes, 1, guestHandle);
+			handle = *guestHandle;
+			ExFreePool(guestHandle);
+		}
+		#else
 		result = ObInsertObject(CreatedDeviceObject, &ObjectAttributes, 1, &handle);
+		#endif
 
 		if (X_NT_SUCCESS(result)) {
 			/* Close the temporary handle and return to caller */

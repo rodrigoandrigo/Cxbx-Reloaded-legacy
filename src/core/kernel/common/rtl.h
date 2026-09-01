@@ -304,6 +304,11 @@ XBSYSAPI EXPORTNUM(289) void_xt NTAPI RtlInitAnsiString
   IN     PCSZ         SourceString
 );
 
+// Initializes an Xbox ANSI_STRING owned by native emulator code. On x64/UWP
+// the source resides above the guest address space and must be materialized in
+// guest memory before its address can be stored in the 32-bit Buffer field.
+void RtlInitAnsiStringHost(ANSI_STRING& DestinationString, const char* SourceString);
+
 XBSYSAPI EXPORTNUM(290) void_xt NTAPI RtlInitUnicodeString
 (
   IN OUT PUNICODE_STRING DestinationString,
@@ -606,10 +611,23 @@ XBSYSAPI EXPORTNUM(352) void_xt NTAPI RtlRip
 );
 
 void_xt RtlInitSystem();
+#if defined(CXBXR_UWP)
+extern PRTL_CRITICAL_SECTION NtSystemTimeCritSecPointer;
+inline PRTL_CRITICAL_SECTION NtSystemTimeCritSecAddress()
+{
+	const auto address = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(NtSystemTimeCritSecPointer));
+	return reinterpret_cast<PRTL_CRITICAL_SECTION>(
+		static_cast<uintptr_t>(address));
+}
+#else
 extern RTL_CRITICAL_SECTION NtSystemTimeCritSec;
+inline PRTL_CRITICAL_SECTION NtSystemTimeCritSecAddress()
+{
+	return &NtSystemTimeCritSec;
+}
+#endif
 
 }
 
 #endif
-
-

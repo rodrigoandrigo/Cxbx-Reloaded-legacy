@@ -168,10 +168,10 @@ static void EmuMuPartitionSetup(xbox::dword_xt MuIndex)
 	char MuX = '0' + static_cast<char>(MuIndex);
 	std::string DeviceName = DeviceMUPrefix + MuX;
 	xbox::STRING xDeviceName;
-	xbox::RtlInitAnsiString(&xDeviceName, DeviceName.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceName, DeviceName.c_str());
 	std::transform(xDeviceName.Buffer, xDeviceName.Buffer + xDeviceName.Length, xDeviceName.Buffer, xbox::RtlLowerChar);
 	xbox::PDEVICE_OBJECT MuDeviceObject;
-	xbox::ntstatus_xt result = xbox::IoCreateDevice(&xbox::MuDriverObject, sizeof(xbox::MU_EXTENSION), &xDeviceName, xbox::FILE_DEVICE_MEMORY_UNIT, FALSE, &MuDeviceObject);
+	xbox::ntstatus_xt result = CxbxIoCreateDeviceFromHost(&xbox::MuDriverObject, sizeof(xbox::MU_EXTENSION), &xDeviceName, xbox::FILE_DEVICE_MEMORY_UNIT, FALSE, &MuDeviceObject);
 	EmuBugCheckInline(result);
 
 	// NOTE: below are incomplete reverse engineered, more research is needed to understand the initialization process.
@@ -208,7 +208,7 @@ static void EmuMuPartitionSetup(xbox::dword_xt MuIndex)
 
 void EmuMuSetup()
 {
-	xbox::RtlInitAnsiString(&xDeviceMUPrefix, DeviceMUPrefix.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceMUPrefix, DeviceMUPrefix.c_str());
 	std::transform(xDeviceMUPrefix.Buffer, xDeviceMUPrefix.Buffer + xDeviceMUPrefix.Length, xDeviceMUPrefix.Buffer, xbox::RtlLowerChar);
 
 	// Create the MU directories and the bin files

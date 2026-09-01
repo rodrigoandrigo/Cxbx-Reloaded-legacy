@@ -56,6 +56,54 @@ inline ::HANDLE CxbxCreateHostFile(
 #endif
 }
 
+inline xbox::ntstatus_xt CxbxIoCreateDeviceFromHost(
+	xbox::PDRIVER_OBJECT driverObject, xbox::ulong_xt extensionSize,
+	const xbox::STRING* deviceName, xbox::ulong_xt deviceType,
+	xbox::boolean_xt exclusive, xbox::PDEVICE_OBJECT* deviceObject)
+{
+#if defined(CXBXR_UWP)
+	xbox::PSTRING guestName = nullptr;
+	if (deviceName != nullptr) {
+		guestName = static_cast<xbox::PSTRING>(
+			xbox::ExAllocatePoolWithTag(sizeof(xbox::STRING), 'nDvI'));
+		if (guestName == nullptr) {
+			return X_STATUS_INSUFFICIENT_RESOURCES;
+		}
+		*guestName = *deviceName;
+	}
+	const auto result = xbox::IoCreateDevice(driverObject, extensionSize,
+		guestName, deviceType, exclusive, deviceObject);
+	if (guestName != nullptr) {
+		xbox::ExFreePool(guestName);
+	}
+	return result;
+#else
+	return xbox::IoCreateDevice(driverObject, extensionSize,
+		const_cast<xbox::STRING*>(deviceName), deviceType, exclusive, deviceObject);
+#endif
+}
+
+inline xbox::ntstatus_xt CxbxIoCreateSymbolicLinkFromHost(
+	const xbox::STRING& symbolicLinkName, const xbox::STRING& deviceName)
+{
+#if defined(CXBXR_UWP)
+	auto guestNames = static_cast<xbox::PSTRING>(xbox::ExAllocatePoolWithTag(
+		2 * sizeof(xbox::STRING), 'lSvI'));
+	if (guestNames == nullptr) {
+		return X_STATUS_INSUFFICIENT_RESOURCES;
+	}
+	guestNames[0] = symbolicLinkName;
+	guestNames[1] = deviceName;
+	const auto result = xbox::IoCreateSymbolicLink(&guestNames[0], &guestNames[1]);
+	xbox::ExFreePool(guestNames);
+	return result;
+#else
+	return xbox::IoCreateSymbolicLink(
+		const_cast<xbox::STRING*>(&symbolicLinkName),
+		const_cast<xbox::STRING*>(&deviceName));
+#endif
+}
+
 inline BOOL CxbxDeleteHostFile(const std::filesystem::path& path)
 {
 #if defined(CXBXR_UWP)

@@ -132,6 +132,71 @@ static void ObUnlock(xbox::KIRQL OldIrql)
 	g_ObMtx.unlock();
 }
 
+#if defined(CXBXR_UWP)
+// Internal object-manager code runs natively in the x64 DLL, while the Xbox
+// exports intentionally use 32-bit guest pointers. Never pass addresses of
+// native stack locals to those exported signatures: materialize their in/out
+// values in guest-addressable storage and copy the small structures back.
+static bool ObDissectNameFromHost(
+	const xbox::OBJECT_STRING& path,
+	xbox::OBJECT_STRING& firstName,
+	xbox::OBJECT_STRING& remainingName)
+{
+	GuestAllocation<xbox::OBJECT_STRING> firstAllocation;
+	GuestAllocation<xbox::OBJECT_STRING> remainingAllocation;
+	auto first = firstAllocation.get();
+	auto remaining = remainingAllocation.get();
+	if (!first || !remaining) {
+		return false;
+	}
+	xbox::ObDissectName(path, first, remaining);
+	firstName = *first;
+	remainingName = *remaining;
+	return true;
+}
+
+static bool ObLookupElementNameFromHost(
+	xbox::POBJECT_DIRECTORY directory,
+	const xbox::OBJECT_STRING& elementName,
+	xbox::boolean_xt resolveSymbolicLink,
+	xbox::PVOID& returnedObject)
+{
+	GuestAllocation<xbox::OBJECT_STRING> nameAllocation;
+	GuestAllocation<xbox::PVOID> resultAllocation;
+	auto name = nameAllocation.get();
+	auto result = resultAllocation.get();
+	if (!name || !result) {
+		returnedObject = xbox::zeroptr;
+		return false;
+	}
+	*name = elementName;
+	*result = xbox::zeroptr;
+	const bool found = xbox::ObpLookupElementNameInDirectory(
+		directory, name, resolveSymbolicLink, result) != FALSE;
+	returnedObject = *result;
+	return found;
+}
+#else
+static bool ObDissectNameFromHost(
+	const xbox::OBJECT_STRING& path,
+	xbox::OBJECT_STRING& firstName,
+	xbox::OBJECT_STRING& remainingName)
+{
+	xbox::ObDissectName(path, &firstName, &remainingName);
+	return true;
+}
+
+static bool ObLookupElementNameFromHost(
+	xbox::POBJECT_DIRECTORY directory,
+	const xbox::OBJECT_STRING& elementName,
+	xbox::boolean_xt resolveSymbolicLink,
+	xbox::PVOID& returnedObject)
+{
+	return xbox::ObpLookupElementNameInDirectory(
+		directory, &elementName, resolveSymbolicLink, &returnedObject) != FALSE;
+}
+#endif
+
 xbox::boolean_xt xbox::ObpCreatePermanentDirectoryObject(
 	IN POBJECT_STRING DirectoryName OPTIONAL,
 	OUT POBJECT_DIRECTORY *DirectoryObject
@@ -149,15 +214,46 @@ xbox::boolean_xt xbox::ObpCreatePermanentDirectoryObject(
 	if (!ObjectAttributes || !Handle) {
 		RETURN(FALSE);
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: directory temporaries allocated (name=%s)",
+		DirectoryName ? DirectoryName->Buffer : "<root>");
+#endif
 	X_InitializeObjectAttributes(ObjectAttributes, DirectoryName, OBJ_PERMANENT, zeroptr);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP object manager: attributes=0x%08X sourceName=0x%08X storedName=0x%08X",
+		static_cast<unsigned>(reinterpret_cast<uintptr_t>(ObjectAttributes)),
+		static_cast<unsigned>(reinterpret_cast<uintptr_t>(DirectoryName)),
+		static_cast<unsigned>(reinterpret_cast<uintptr_t>(ObjectAttributes->ObjectName)));
+#endif
 
 	NTSTATUS result = NtCreateDirectoryObject(Handle, ObjectAttributes);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: NtCreateDirectoryObject returned 0x%08X", result);
+#endif
 
 	if (!X_NT_SUCCESS(result)) {
 		RETURN(FALSE);
 	}
 	
+#if defined(CXBXR_UWP)
+	GuestAllocation<PVOID> directoryReferenceAllocation;
+	auto directoryReference = directoryReferenceAllocation.get();
+	if (!directoryReference) {
+		NtClose(*Handle);
+		RETURN(FALSE);
+	}
+	result = ObReferenceObjectByHandle(
+		*Handle, &ObDirectoryObjectType, directoryReference);
+	if (X_NT_SUCCESS(result)) {
+		*DirectoryObject = reinterpret_cast<POBJECT_DIRECTORY>(*directoryReference);
+	}
+#else
 	result = ObReferenceObjectByHandle(*Handle, &ObDirectoryObjectType, (PVOID *)DirectoryObject);
+#endif
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: directory handle referenced (status=0x%08X)", result);
+#endif
 	
 	if (!X_NT_SUCCESS(result)) {
 		NtClose(*Handle);
@@ -235,7 +331,10 @@ xbox::ntstatus_xt xbox::ObpReferenceObjectByName(
 	for (;;) {
 		{
 			POBJECT_DIRECTORY Directory = (POBJECT_DIRECTORY)FoundObject;
-			ObDissectName(RemainingName, &ElementName, &RemainingName);
+			if (!ObDissectNameFromHost(RemainingName, ElementName, RemainingName)) {
+				result = X_STATUS_INSUFFICIENT_RESOURCES;
+				goto CleanupAndExit;
+			}
 
 			if (RemainingName.Length != 0) {
 				if (RemainingName.Buffer[0] == OBJ_NAME_PATH_SEPARATOR) {
@@ -249,8 +348,8 @@ xbox::ntstatus_xt xbox::ObpReferenceObjectByName(
 				}
 			}
 
-			if (!ObpLookupElementNameInDirectory(Directory, &ElementName,
-				ResolveSymbolicLink, &FoundObject)) {
+			if (!ObLookupElementNameFromHost(Directory, ElementName,
+				ResolveSymbolicLink, FoundObject)) {
 				result = (RemainingName.Length != 0) ? STATUS_OBJECT_PATH_NOT_FOUND : X_STATUS_OBJECT_NAME_NOT_FOUND;
 				goto CleanupAndExit;
 			}
@@ -331,6 +430,7 @@ xbox::boolean_xt xbox::ObInitSystem()
 	if (!ObpDosDevicesString || !ObpIoDevicesString || !ObpWin32NamedObjectsString) {
 		return FALSE;
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: permanent names allocated");
 #endif
 	ObpObjectHandleTable.HandleCount = 0;
 	ObpObjectHandleTable.FirstFreeTableEntry = -1;
@@ -346,6 +446,7 @@ xbox::boolean_xt xbox::ObInitSystem()
 	std::memset(g_ObBuiltinRootTable, 0,
 		sizeof(xbox::PPVOID) * OB_TABLES_PER_SEGMENT);
 	ObpObjectHandleTable.RootTable = g_ObBuiltinRootTable;
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: handle root table allocated");
 #else
 	ObpObjectHandleTable.RootTable = NULL;
 #endif
@@ -359,26 +460,42 @@ xbox::boolean_xt xbox::ObInitSystem()
 		return FALSE;
 	}
 	ObpDefaultObjectPointer = reinterpret_cast<xbox::PKEVENT>(defaultObjectAddress);
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: default event allocated");
 #endif
 	ObpDefaultObjectAddress()->Header.Absolute = FALSE;
 	ObpDefaultObjectAddress()->Header.Inserted = FALSE;
 	KeInitializeEvent(ObpDefaultObjectAddress(), SynchronizationEvent, TRUE);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: default event initialized");
+#endif
 
 	if (!ObpCreatePermanentDirectoryObject(NULL, &ObpRootDirectoryObject)) {
 		return FALSE;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: root directory created");
+#endif
 
 	if (!ObpCreatePermanentDirectoryObject(ObpDosDevicesString, &ObpDosDevicesDirectoryObject)) {
 		return FALSE;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: DOS devices directory created");
+#endif
 
 	if (!ObpCreatePermanentDirectoryObject(ObpIoDevicesString, &ObpIoDevicesDirectoryObject)) {
 		return FALSE;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: IO devices directory created");
+#endif
 
 	if (!ObpCreatePermanentDirectoryObject(ObpWin32NamedObjectsString, &ObpWin32NamedObjectsDirectoryObject)) {
 		return FALSE;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: Win32 named objects directory created");
+#endif
 
 	return TRUE;
 }
@@ -481,6 +598,14 @@ xbox::HANDLE xbox::ObpCreateObjectHandle(xbox::PVOID Object)
 xbox::void_xt xbox::ObDissectName(OBJECT_STRING Path, POBJECT_STRING FirstName, POBJECT_STRING RemainingName)
 {
 	ULONG i = 0;
+#if defined(CXBXR_UWP) && defined(_WIN64)
+	const auto pathBufferAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(Path.Buffer));
+	auto PathBuffer = reinterpret_cast<char*>(
+		static_cast<uintptr_t>(pathBufferAddress));
+#else
+	auto PathBuffer = Path.Buffer;
+#endif
 	
 	FirstName->Length = 0;
 	FirstName->MaximumLength = 0;
@@ -496,23 +621,23 @@ xbox::void_xt xbox::ObDissectName(OBJECT_STRING Path, POBJECT_STRING FirstName, 
 		return;
 	}
 
-	if (Path.Buffer[0] == '\\') {
+	if (PathBuffer[0] == '\\') {
 		i = 1;
 	}
 
 	ULONG FirstNameStart;
-	for (FirstNameStart = i; (i < PathLength) && (Path.Buffer[i] != '\\'); i += 1) {
+	for (FirstNameStart = i; (i < PathLength) && (PathBuffer[i] != '\\'); i += 1) {
 		;
 	}
 
 	FirstName->Length = (USHORT)((i - FirstNameStart) * sizeof(CHAR));
 	FirstName->MaximumLength = FirstName->Length;
-	FirstName->Buffer = &Path.Buffer[FirstNameStart];
+	FirstName->Buffer = &PathBuffer[FirstNameStart];
 
 	if (i < PathLength) {
 		RemainingName->Length = (USHORT)((PathLength - (i + 1)) * sizeof(CHAR));
 		RemainingName->MaximumLength = RemainingName->Length;
-		RemainingName->Buffer = &Path.Buffer[i + 1];
+		RemainingName->Buffer = &PathBuffer[i + 1];
 	}
 
 	return;
@@ -556,7 +681,9 @@ xbox::ntstatus_xt xbox::ObpResolveLinkTarget(
 	/* Perform search for object last known allocated */
 	while (1) {
 		OBJECT_STRING ElementName;
-		ObDissectName(RemainingName, &ElementName, &RemainingName);
+		if (!ObDissectNameFromHost(RemainingName, ElementName, RemainingName)) {
+			break;
+		}
 
 		/* Verify RemainingName does not have multiple backslashes */
 		if (RemainingName.Length && RemainingName.Buffer[0] == OBJ_NAME_PATH_SEPARATOR) {
@@ -565,7 +692,7 @@ xbox::ntstatus_xt xbox::ObpResolveLinkTarget(
 
 		/* Search ElementName in the directory and verify it does not exist yet.*/
 		PVOID FoundObject;
-		if (!ObpLookupElementNameInDirectory(directory, &ElementName, TRUE, &FoundObject)) {
+		if (!ObLookupElementNameFromHost(directory, ElementName, TRUE, FoundObject)) {
 			break;
 		}
 
@@ -634,7 +761,14 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 		LOG_FUNC_ARG(ObjectAttributes)
 		LOG_FUNC_ARG(ObjectBodySize)
 		LOG_FUNC_ARG_OUT(Object)
-		LOG_FUNC_END;
+	LOG_FUNC_END;
+
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP object manager: ObCreateObject inputs attributes=0x%08X objectName=0x%08X",
+		static_cast<unsigned>(reinterpret_cast<uintptr_t>(ObjectAttributes)),
+		ObjectAttributes ? static_cast<unsigned>(reinterpret_cast<uintptr_t>(ObjectAttributes->ObjectName)) : 0u);
+#endif
 
 	if (ObjectAttributes == NULL || ObjectAttributes->ObjectName == NULL) {
 		POBJECT_HEADER ObjectHeader = (POBJECT_HEADER)ObjectType->AllocateProcedure(offsetof(OBJECT_HEADER, Body) + ObjectBodySize, ObjectType->PoolTag);
@@ -657,13 +791,32 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 		RETURN(X_STATUS_SUCCESS);
 	}
 
+	/*
+	 * MSVC can still sign-extend a nested __ptr32 value when it is
+	 * dereferenced directly, even though the pointer typedef is __uptr.  Xbox
+	 * system allocations live at 0xD0000000 and above, so normalize through
+	 * the 32-bit guest address before producing a native pointer.
+	 */
+#if defined(CXBXR_UWP) && defined(_WIN64)
+	const auto objectNameAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(ObjectAttributes->ObjectName));
+	const auto objectName = reinterpret_cast<const OBJECT_STRING*>(
+		static_cast<uintptr_t>(objectNameAddress));
+	OBJECT_STRING RemainingName = *objectName;
+#else
 	OBJECT_STRING RemainingName = *ObjectAttributes->ObjectName;
+#endif
 	OBJECT_STRING ElementName;
 	ElementName.Buffer = NULL;
 	ElementName.Length = 0;
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: dissecting object name");
+#endif
 
 	while (RemainingName.Length != 0) {
-		ObDissectName(RemainingName, &ElementName, &RemainingName);
+		if (!ObDissectNameFromHost(RemainingName, ElementName, RemainingName)) {
+			RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
+		}
 		if ((RemainingName.Length != 0) && (RemainingName.Buffer[0] == OBJ_NAME_PATH_SEPARATOR)) {
 			RETURN(X_STATUS_OBJECT_NAME_INVALID);
 		}
@@ -672,6 +825,9 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 	if (ElementName.Length == 0) {
 		RETURN(X_STATUS_OBJECT_NAME_INVALID);
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: object name dissected (length=%u)", ElementName.Length);
+#endif
 
 	ObjectBodySize = ALIGN_UP(ObjectBodySize, ULONG);
 
@@ -961,7 +1117,15 @@ XBSYSAPI EXPORTNUM(241) xbox::ntstatus_xt NTAPI xbox::ObInsertObject
 	HANDLE Handle = NULL;
 	PVOID InsertObject = Object;
 	if (ObjectAttributes != NULL && ObjectAttributes->ObjectName != NULL) {
+#if defined(CXBXR_UWP) && defined(_WIN64)
+		const auto objectNameAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(ObjectAttributes->ObjectName));
+		const auto objectName = reinterpret_cast<const OBJECT_STRING*>(
+			static_cast<uintptr_t>(objectNameAddress));
+		OBJECT_STRING RemainingName = *objectName;
+#else
 		OBJECT_STRING RemainingName = *ObjectAttributes->ObjectName;
+#endif
 		HANDLE RootDirectoryHandle = ObjectAttributes->RootDirectory;
 
 		if (RootDirectoryHandle != NULL) {
@@ -998,9 +1162,12 @@ XBSYSAPI EXPORTNUM(241) xbox::ntstatus_xt NTAPI xbox::ObInsertObject
 
 		for (;;) {
 			OBJECT_STRING ElementName;
-			ObDissectName(RemainingName, &ElementName, &RemainingName);
+			if (!ObDissectNameFromHost(RemainingName, ElementName, RemainingName)) {
+				result = X_STATUS_INSUFFICIENT_RESOURCES;
+				goto CleanupAndExit;
+			}
 			PVOID FoundObject;
-			if (ObpLookupElementNameInDirectory(Directory, &ElementName, TRUE, &FoundObject)) {
+			if (ObLookupElementNameFromHost(Directory, ElementName, TRUE, FoundObject)) {
 				if (RemainingName.Length == 0) {
 					if (ObpIsFlagSet(ObjectAttributes->Attributes, OBJ_OPENIF)) {
 						if (OBJECT_TO_OBJECT_HEADER(FoundObject)->Type == OBJECT_TO_OBJECT_HEADER(Object)->Type) {

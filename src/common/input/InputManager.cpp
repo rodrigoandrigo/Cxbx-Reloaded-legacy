@@ -47,6 +47,8 @@
 #endif
 #include "InputManager.h"
 #if defined(CXBXR_UWP)
+#define SDL_MAIN_HANDLED 1
+#include <SDL3/SDL_main.h>
 #include "common/CxbxEmbedRuntime.h"
 #endif
 #include "..\devices\usb\XidGamepad.h"
@@ -83,6 +85,15 @@ InputDeviceManager g_InputDeviceManager;
 
 void InputDeviceManager::Initialize(bool is_gui, CxbxInputWindowHandle hwnd)
 {
+	#if defined(CXBXR_UWP)
+	// An embedded DLL does not execute SDL's WinRT application entry point,
+	// which normally performs this registration before SDL_Init. Without it,
+	// SDL3 rejects subsystem initialization with "Application didn't initialize
+	// properly" even though the UWP host itself is already running.
+	SDL_SetMainReady();
+	EmuLogInit(LOG_LEVEL::INFO, "UWP input: SDL embedded application registered");
+	#endif
+
 	// Sdl::Init must be called last since it blocks when it succeeds
 	std::unique_lock<std::mutex> lck(m_Mtx);
 	m_bPendingShutdown = false;

@@ -934,15 +934,27 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 		// Set PrcbData.CurrentThread
 		Prcb->CurrentThread = (xbox::PKTHREAD)Ethread;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KPCR thread links initialized");
+#endif
 
 	// Create a host wake event for this thread's dispatcher waits
 	CxbxRegisterThreadWakeEvent((xbox::PKTHREAD)Ethread);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: host wake event registered");
+#endif
 
 	// Make the KPCR struct available to EmuKeGetPcr()
 	EmuKeSetPcr(NewPcr);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KPCR installed for host thread");
+#endif
 
 	EmuLog(LOG_LEVEL::DEBUG, "Installed KPCR in TIB_ArbitraryDataSlot (with Ethread->Tcb.TlsData = 0x%.8X)", Ethread->Tcb.TlsData);
 
 	_controlfp(_PC_53, _MCW_PC); // Set Precision control to 53 bits (verified setting)
 	_controlfp(_RC_NEAR, _MCW_RC); // Set Rounding control to near (unsure about this)
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: floating-point mode initialized");
+#endif
 }

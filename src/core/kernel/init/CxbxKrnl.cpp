@@ -1318,16 +1318,26 @@ static void CxbxrKrnlInitHacks()
 #else
 	EmuGenerateFS<true>(xbox::zeroptr, Host2XbStackBaseReserved, Host2XbStackSizeReserved);
 #endif
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: host thread context initialized");
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing object manager");
 	if (!xbox::ObInitSystem()) {
 		CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to initialize ObInitSystem.");
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: object manager initialized");
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing process manager");
 	xbox::PsInitSystem();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: process manager initialized");
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing kernel scheduler data");
 	xbox::KiInitSystem();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: kernel scheduler data initialized");
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing runtime library");
 	xbox::RtlInitSystem();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: runtime library initialized");
 
 	// initialize graphics
 	EmuLogInit(LOG_LEVEL::DEBUG, "Initializing render window.");
 	CxbxInitWindow();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: render window initialized");
 
 	// Now process the boot flags to see if there are any special conditions to handle
 	if (BootFlags & BOOT_EJECT_PENDING) {} // TODO
@@ -1342,74 +1352,154 @@ static void CxbxrKrnlInitHacks()
 	if (BootFlags & BOOT_SKIP_ANIMATION) {} // TODO
 	if (BootFlags & BOOT_RUN_DASHBOARD) {} // TODO
 
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing audio");
 	CxbxInitAudio();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: audio initialized");
 
 	// EmuHLEIntercept must be call before MapThunkTable, otherwise scanning for symbols will not work properly.
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing HLE interception");
 	EmuHLEIntercept(pXbeHeader);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: HLE interception initialized");
 
 	// Decode kernel thunk table address :
 	uint32_t kt = CxbxKrnl_Xbe->m_Header.dwKernelImageThunkAddr;
 	kt ^= XOR_KT_KEY[to_underlying(CxbxKrnl_Xbe->GetXbeType())];
 
 	// Process the Kernel thunk table to map Kernel function calls to their actual address :
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: mapping kernel thunk table at 0x%08X", kt);
 	MapThunkTable((uint32_t *)kt, CxbxKrnl_KernelThunkTable);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: kernel thunk table mapped");
 
 	// Does this xbe import any other libraries?
 	if (CxbxKrnl_Xbe->m_Header.dwNonKernelImportDirAddr) {
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: importing non-kernel libraries at 0x%08X",
+			CxbxKrnl_Xbe->m_Header.dwNonKernelImportDirAddr);
 		ImportLibraries((XbeImportEntry *)CxbxKrnl_Xbe->m_Header.dwNonKernelImportDirAddr);
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: non-kernel libraries imported");
 	}
 
 	if (!bLLE_USB) {
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing Xbox device types");
 		SetupXboxDeviceTypes();
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: Xbox device types initialized");
 	}
 
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing Xbox hardware");
 	InitXboxHardware(hardwareModel);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: Xbox hardware initialized");
 
 	// Allocate HalDiskModelNumber/SerialNumber buffers from Xbox pool memory
 	// so that MmIsAddressValid returns TRUE for the Buffer pointers.
 	{
+		#if defined(CXBXR_UWP)
+		// The ANSI_STRING Buffer fields use the 32-bit Xbox ABI. Their desktop
+		// static initializers point into the native module and are truncated in
+		// an x64 DLL, so retain native sources until guest buffers are allocated.
+		static constexpr char kHalDiskModelNumber[] =
+			"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+		static constexpr char kHalDiskSerialNumber[] = "XXXXXXXXXXXXXXXXXXXX";
+		const char* modelSource = kHalDiskModelNumber;
+		const char* serialSource = kHalDiskSerialNumber;
+		#else
+		const char* modelSource = xbox::HalDiskModelNumber.Buffer;
+		const char* serialSource = xbox::HalDiskSerialNumber.Buffer;
+		#endif
+
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: allocating disk identity buffers");
 		PCHAR pModelBuf = (PCHAR)xbox::ExAllocatePoolWithTag(xbox::HalDiskModelNumber.MaximumLength, 'dlaH');
-		memcpy(pModelBuf, xbox::HalDiskModelNumber.Buffer, xbox::HalDiskModelNumber.MaximumLength);
+		if (pModelBuf == nullptr) {
+			CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to allocate HalDiskModelNumber buffer");
+		}
+		memcpy(pModelBuf, modelSource, xbox::HalDiskModelNumber.MaximumLength);
 		xbox::HalDiskModelNumber.Buffer = pModelBuf;
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: disk model buffer initialized at 0x%08X",
+			static_cast<unsigned>(reinterpret_cast<uintptr_t>(pModelBuf)));
 
 		PCHAR pSerialBuf = (PCHAR)xbox::ExAllocatePoolWithTag(xbox::HalDiskSerialNumber.MaximumLength, 'dlaH');
-		memcpy(pSerialBuf, xbox::HalDiskSerialNumber.Buffer, xbox::HalDiskSerialNumber.MaximumLength);
+		if (pSerialBuf == nullptr) {
+			CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to allocate HalDiskSerialNumber buffer");
+		}
+		memcpy(pSerialBuf, serialSource, xbox::HalDiskSerialNumber.MaximumLength);
 		xbox::HalDiskSerialNumber.Buffer = pSerialBuf;
+		EmuLogInit(LOG_LEVEL::INFO,
+			"Bootstrap: disk identity buffers allocated (model=0x%08X, serial=0x%08X)",
+			static_cast<unsigned>(reinterpret_cast<uintptr_t>(pModelBuf)),
+			static_cast<unsigned>(reinterpret_cast<uintptr_t>(pSerialBuf)));
 	}
 
 	// Read Xbox video mode from the SMC, store it in HalBootSMCVideoMode
-	xbox::HalReadSMBusValue(SMBUS_ADDRESS_SYSTEM_MICRO_CONTROLLER, SMC_COMMAND_AV_PACK, FALSE, (xbox::PULONG)&xbox::HalBootSMCVideoMode);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: reading boot video mode from SMC");
+#if defined(CXBXR_UWP)
+	// HalReadSMBusValue has an Xbox ABI and therefore requires its output pointer
+	// to be in the 32-bit guest address space.  &HalBootSMCVideoMode is a native
+	// x64 DLL address and must never be narrowed to xbox::PULONG.
+	auto videoModeGuest = static_cast<xbox::PULONG>(
+		xbox::ExAllocatePoolWithTag(sizeof(xbox::ulong_xt), 'mVbH'));
+	if (videoModeGuest == nullptr) {
+		CxbxrAbortEx(LOG_PREFIX_INIT, "Unable to allocate boot video mode output");
+	}
+	const auto videoModeStatus = xbox::HalReadSMBusValue(
+		SMBUS_ADDRESS_SYSTEM_MICRO_CONTROLLER, SMC_COMMAND_AV_PACK, FALSE,
+		videoModeGuest);
+	if (videoModeStatus == X_STATUS_SUCCESS) {
+		xbox::HalBootSMCVideoMode = *videoModeGuest;
+	}
+	xbox::ExFreePool(videoModeGuest);
+#else
+	const auto videoModeStatus = xbox::HalReadSMBusValue(
+		SMBUS_ADDRESS_SYSTEM_MICRO_CONTROLLER, SMC_COMMAND_AV_PACK, FALSE,
+		(xbox::PULONG)&xbox::HalBootSMCVideoMode);
+#endif
+	EmuLogInit(LOG_LEVEL::INFO,
+		"Bootstrap: boot video mode read (status=0x%08X, value=0x%08X)",
+		static_cast<unsigned>(videoModeStatus),
+		static_cast<unsigned>(xbox::HalBootSMCVideoMode));
 
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing input manager");
 	g_InputDeviceManager.Initialize(false, g_hEmuWindow);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: input manager initialized");
 
 	// Now the hardware devices exist, couple the EEPROM buffer to it's device
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: attaching EEPROM device storage");
 	g_EEPROM->SetEEPROM((uint8_t*)EEPROM);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: EEPROM device storage attached");
 
 	EmuLogInit(LOG_LEVEL::DEBUG, "Initializing Direct3D.");
 	EmuD3DInit();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: Direct3D emulation initialized");
 
 	// Create the host D3D11 device before Xbox code starts.
 	// Must be after EmuD3DInit() which initializes g_EmuCDPD adapter settings,
 	// and after CxbxInitWindow() which creates g_hEmuWindow.
 	CxbxInitHostD3DDevice();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: host D3D11 device initialized");
 
 	// Now that the D3D11 device exists, start the FIFO threads.
 	// The puller thread calls D3D11 APIs during draw dispatch, so the
 	// device must be fully created before it can process any commands.
 	extern NV2ADevice* g_NV2A;
 	g_NV2A->StartFifoThreads();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: NV2A FIFO threads started");
 
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: checking title mount path");
 	bool isEmuDisk = CxbxrIsPathInsideEmuDisk(relative_path);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: title mount path classified (EmuDisk=%s)",
+		isEmuDisk ? "true" : "false");
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: mounting Xbox drives");
 	CxbxrSetupDrives(relative_path, BootFlags);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: Xbox drives mounted");
 
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing MU metadata");
 	std::mbstate_t ps = std::mbstate_t();
 	const char* src = g_MuBasePath.c_str();
 	std::wstring wMuBasePath(g_MuBasePath.size(), L'0');
 	std::mbsrtowcs(wMuBasePath.data(), &src, wMuBasePath.size(), &ps);
 	g_io_mu_metadata = new io_mu_metadata(wMuBasePath);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: MU metadata initialized");
 
 	// Determine Xbox path to XBE and place it in XeImageFileName
 	{
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: publishing XBE image path");
 		std::string fileName;
 		if (xbox::LaunchDataPage == xbox::zeroptr) {
 			// First launch and possible launch to dashboard
@@ -1453,6 +1543,7 @@ static void CxbxrKrnlInitHacks()
 		xbox::XeImageFileName.Buffer = (PCHAR)xbox::ExAllocatePoolWithTag(xbox::XeImageFileName.MaximumLength, 'nFeX');
 		strncpy_s(xbox::XeImageFileName.Buffer, xbox::XeImageFileName.MaximumLength, fileName.c_str(), fileName.size());
 		EmuLogInit(LOG_LEVEL::INFO, "XeImageFileName = %s", xbox::XeImageFileName.Buffer);
+		EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: XBE image path published");
 	}
 
 	if (CxbxDebugger::CanReport())

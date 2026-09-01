@@ -286,7 +286,7 @@ static void EmuDiskPartitionSetup(size_t partitionIndex, bool IsFile=false)
 	}
 
 	xbox::PDEVICE_OBJECT DiskDeviceObject;
-	xbox::ntstatus_xt result = xbox::IoCreateDevice(&xbox::DiskDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), nullptr, xbox::FILE_DEVICE_DISK2, FALSE, &DiskDeviceObject);
+	xbox::ntstatus_xt result = CxbxIoCreateDeviceFromHost(&xbox::DiskDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), nullptr, xbox::FILE_DEVICE_DISK2, FALSE, &DiskDeviceObject);
 	EmuBugCheckInline(result);
 
 	// NOTE: below are incomplete reverse engineered, more research is needed to understand the initialization process.
@@ -323,32 +323,65 @@ static void EmuDiskPartitionSetup(size_t partitionIndex, bool IsFile=false)
 
 static xbox::ntstatus_xt EmuBindDeviceNameToObjectType(xbox::STRING& xTargetName, xbox::OBJECT_TYPE& ObjectType)
 {
+	#if defined(CXBXR_UWP)
+	// OBJECT_ATTRIBUTES::ObjectName is an Xbox 32-bit pointer. The STRING
+	// object itself therefore has to live in guest memory even though its
+	// character buffer was already materialized there by RtlInitAnsiStringHost.
+	auto guestTargetName = static_cast<xbox::PSTRING>(
+		xbox::ExAllocatePoolWithTag(sizeof(xbox::STRING), 'nDbO'));
+	if (guestTargetName == nullptr) {
+		return X_STATUS_INSUFFICIENT_RESOURCES;
+	}
+	*guestTargetName = xTargetName;
+	#else
+	auto guestTargetName = &xTargetName;
+	#endif
+
 	xbox::OBJECT_ATTRIBUTES objAttrs;
-	X_InitializeObjectAttributes(&objAttrs, &xTargetName, OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, xbox::zeroptr);
+	X_InitializeObjectAttributes(&objAttrs, guestTargetName,
+		OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, xbox::zeroptr);
 
 	xbox::PVOID TargetDirectoryObject;
 	xbox::ntstatus_xt result = xbox::ObCreateObject(&ObjectType, &objAttrs, 0, &TargetDirectoryObject);
-	EmuBugCheckInline(result);
+	if (X_NT_SUCCESS(result)) {
+		xbox::HANDLE xHandle;
+		#if defined(CXBXR_UWP)
+		auto guestHandle = static_cast<xbox::PHANDLE>(
+			xbox::ExAllocatePoolWithTag(sizeof(xbox::HANDLE), 'hDbO'));
+		if (guestHandle == nullptr) {
+			result = X_STATUS_INSUFFICIENT_RESOURCES;
+		}
+		else {
+			result = xbox::ObInsertObject(TargetDirectoryObject, &objAttrs, 0, guestHandle);
+			xHandle = *guestHandle;
+			xbox::ExFreePool(guestHandle);
+		}
+		#else
+		result = xbox::ObInsertObject(TargetDirectoryObject, &objAttrs, 0, &xHandle);
+		#endif
+		if (X_NT_SUCCESS(result)) {
+			xbox::NtClose(xHandle);
+		}
+	}
 
-	xbox::HANDLE xHandle;
-	result = xbox::ObInsertObject(TargetDirectoryObject, &objAttrs, 0, &xHandle);
-	EmuBugCheckInline(result);
-	xbox::NtClose(xHandle);
+	#if defined(CXBXR_UWP)
+	xbox::ExFreePool(guestTargetName);
+	#endif
 
 	return result;
 }
 
 void EmuDiskSetup()
 {
-	xbox::RtlInitAnsiString(&xDeviceHarddisk0, DeviceHarddisk0.c_str());
-	xbox::RtlInitAnsiString(&xPartitionPrefix, PartitionPrefix.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceHarddisk0, DeviceHarddisk0.c_str());
+	xbox::RtlInitAnsiStringHost(xPartitionPrefix, PartitionPrefix.c_str());
 	std::transform(xPartitionPrefix.Buffer, xPartitionPrefix.Buffer + xPartitionPrefix.Length, xPartitionPrefix.Buffer, xbox::RtlLowerChar);
 
 	xbox::ntstatus_xt result = EmuBindDeviceNameToObjectType(xDeviceHarddisk0, DiskDirectoryObjectType);
 	EmuBugCheckInline(result);
 
 	xbox::PDEVICE_OBJECT DiskDeviceObject;
-	result = xbox::IoCreateDevice(&xbox::DiskDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), nullptr, xbox::FILE_DEVICE_DISK2, FALSE, &DiskDeviceObject);
+	result = CxbxIoCreateDeviceFromHost(&xbox::DiskDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), nullptr, xbox::FILE_DEVICE_DISK2, FALSE, &DiskDeviceObject);
 	EmuBugCheckInline(result);
 
 	// NOTE: below are incomplete reverse engineered, more research is needed to understand the initialization process.

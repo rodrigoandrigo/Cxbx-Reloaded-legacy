@@ -192,13 +192,25 @@ xbox::void_xt xbox::KiInitSystem()
 		CxbxrAbort("KiInitSystem: unable to allocate guest-addressable kernel lists");
 		return;
 	}
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP KiInitSystem: core storage allocated (process=0x%08X wait=0x%08X timers=0x%08X)",
+		static_cast<unsigned>(processAddress), static_cast<unsigned>(waitListAddress),
+		static_cast<unsigned>(timerTableAddress));
 	KiUniqueProcessPointer = reinterpret_cast<xbox::PKPROCESS>(processAddress);
 	KiWaitInListHeadPointer = reinterpret_cast<xbox::PLIST_ENTRY>(waitListAddress);
 	KiTimerTableListHeadPointer =
 		reinterpret_cast<xbox::KTIMER_TABLE_ENTRY*>(timerTableAddress);
-	std::memset(KiUniqueProcessPointer, 0, sizeof(xbox::KPROCESS));
+	// Keep native-width aliases for host initialization. Directly
+	// dereferencing the exported __ptr32 globals can sign-extend Xbox system
+	// addresses in the 0xD0000000 range on MSVC x64.
+	auto nativeUniqueProcess = reinterpret_cast<xbox::KPROCESS*>(
+		static_cast<uintptr_t>(static_cast<uint32_t>(processAddress)));
+	auto nativeWaitListHead = reinterpret_cast<xbox::LIST_ENTRY*>(
+		static_cast<uintptr_t>(static_cast<uint32_t>(waitListAddress)));
+	std::memset(nativeUniqueProcess, 0, sizeof(xbox::KPROCESS));
 	std::memset(KiTimerTableListHeadPointer, 0,
 		sizeof(xbox::KTIMER_TABLE_ENTRY) * TIMER_TABLE_SIZE);
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: core storage initialized");
 
 	const auto idexAddress = g_VMManager.AllocateSystemMemory(
 		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
@@ -210,14 +222,24 @@ xbox::void_xt xbox::KiInitSystem()
 	auto idexChannelObject = reinterpret_cast<xbox::PIDE_CHANNEL_OBJECT>(idexAddress);
 	std::memset(idexChannelObject, 0, sizeof(xbox::IDE_CHANNEL_OBJECT));
 	CxbxKrnl_KernelThunkTable[357] = idexAddress;
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: IDE channel initialized");
 #else
 	auto idexChannelObject = &IdexChannelObject;
 #endif
+#if defined(CXBXR_UWP)
+	nativeUniqueProcess->StackCount = 0;
+	nativeUniqueProcess->ThreadQuantum = X_THREAD_QUANTUM;
+	InitializeListHead(&nativeUniqueProcess->ThreadListHead);
+	InitializeListHead(nativeWaitListHead);
+#else
 	KiUniqueProcess.StackCount = 0;
 	KiUniqueProcess.ThreadQuantum = X_THREAD_QUANTUM;
 	InitializeListHead(&KiUniqueProcess.ThreadListHead);
-
 	InitializeListHead(&KiWaitInListHead);
+#endif
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: process and wait lists initialized");
+#endif
 
 	KiTimerMtx.Acquired = 0;
 #if defined(CXBXR_UWP)
@@ -228,15 +250,25 @@ xbox::void_xt xbox::KiInitSystem()
 		return;
 	}
 	KiTimerExpireDpc = reinterpret_cast<xbox::PKDPC>(timerDpcAddress);
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: timer DPC storage allocated");
 #endif
 	KeInitializeDpc(KiTimerExpireDpc, KiTimerExpiration, NULL);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: timer DPC initialized");
+#endif
 	for (unsigned i = 0; i < TIMER_TABLE_SIZE; i++) {
 		InitializeListHead(&KiTimerTableListHead[i].Entry);
 		KiTimerTableListHead[i].Time.u.HighPart = 0xFFFFFFFF;
 		KiTimerTableListHead[i].Time.u.LowPart = 0;
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: timer table initialized");
+#endif
 
 	InitializeListHead(&idexChannelObject->DeviceQueue.DeviceListHead);
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP KiInitSystem: IDE device queue initialized");
+#endif
 }
 
 xbox::void_xt xbox::KiTimerLock()

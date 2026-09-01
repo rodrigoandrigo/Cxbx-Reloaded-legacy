@@ -131,7 +131,7 @@ static void EmuMediaBoardPartitionSetup(
 	}
 	std::string XboxDevicePartitionPath = DeviceMediaBoardPartitionPrefix + partitionX;
 	xbox::STRING xXboxDevicePartitionPath;
-	xbox::RtlInitAnsiString(&xXboxDevicePartitionPath, XboxDevicePartitionPath.c_str());
+	xbox::RtlInitAnsiStringHost(xXboxDevicePartitionPath, XboxDevicePartitionPath.c_str());
 
 	bool succeeded{ true };
 	std::string partitionHeaderPath = partitionPath.HostDevicePath + ".bin";
@@ -151,14 +151,14 @@ static void EmuMediaBoardPartitionSetup(
 	}
 
 	xbox::PDEVICE_OBJECT MediaBoardDeviceObject;
-	xbox::ntstatus_xt result = xbox::IoCreateDevice(&xbox::MediaBoardDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), &xXboxDevicePartitionPath, xbox::FILE_DEVICE_MEDIA_BOARD, FALSE, &MediaBoardDeviceObject);
+	xbox::ntstatus_xt result = CxbxIoCreateDeviceFromHost(&xbox::MediaBoardDriverObject, sizeof(xbox::IDE_DISK_EXTENSION), &xXboxDevicePartitionPath, xbox::FILE_DEVICE_MEDIA_BOARD, FALSE, &MediaBoardDeviceObject);
 	EmuBugCheckInline(result);
 
-	result = xbox::IoCreateSymbolicLink(&DosDeviceName, &xXboxDevicePartitionPath);
+	result = CxbxIoCreateSymbolicLinkFromHost(DosDeviceName, xXboxDevicePartitionPath);
 	EmuBugCheckInline(result);
 
 	if (partitionIndex == 0) {
-		result = xbox::IoCreateSymbolicLink(&xDeviceCdRom0, &xXboxDevicePartitionPath);
+		result = CxbxIoCreateSymbolicLinkFromHost(xDeviceCdRom0, xXboxDevicePartitionPath);
 		EmuBugCheckInline(result);
 	}
 
@@ -195,13 +195,13 @@ static void EmuMediaBoardPartitionSetup(
 
 void EmuMediaBoardSetup(std::filesystem::path CdRomPath, int BootFlags)
 {
-	xbox::RtlInitAnsiString(&xDeviceCdRom0, DeviceCdrom0.c_str());
-	xbox::RtlInitAnsiString(&xDeviceMediaBoard, DeviceMediaBoard.c_str());
-	xbox::RtlInitAnsiString(&xDriveMbfs, DriveMbfs.c_str());
-	xbox::RtlInitAnsiString(&xDriveMbcom, DriveMbcom.c_str());
-	xbox::RtlInitAnsiString(&xDriveMbrom0, DriveMbrom0.c_str());
-	xbox::RtlInitAnsiString(&xDriveMbrom1, DriveMbrom1.c_str());
-	xbox::RtlInitAnsiString(&xDriveD, DriveD.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceCdRom0, DeviceCdrom0.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceMediaBoard, DeviceMediaBoard.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveMbfs, DriveMbfs.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveMbcom, DriveMbcom.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveMbrom0, DriveMbrom0.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveMbrom1, DriveMbrom1.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveD, DriveD.c_str());
 
 	// Create directory object for MediaBoard device
 	xbox::HANDLE xHandle;
@@ -236,6 +236,6 @@ void EmuMediaBoardSetup(std::filesystem::path CdRomPath, int BootFlags)
 
 	// Since chihiro titles could not be in EmuMediaBoard folder, we need to always
 	// mount D drive from the kernel's side.
-	result = xbox::IoCreateSymbolicLink(&xDriveD, &xDeviceCdRom0);
+	result = CxbxIoCreateSymbolicLinkFromHost(xDriveD, xDeviceCdRom0);
 	EmuBugCheckInline(result);
 }

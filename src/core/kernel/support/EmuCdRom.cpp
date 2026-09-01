@@ -96,12 +96,12 @@ static void EmuBugCheckInline(const xbox::ntstatus_xt result)
 
 void EmuCdRomSetup(std::filesystem::path CdRomPath, int BootFlags)
 {
-	xbox::RtlInitAnsiString(&xDeviceCdRom0, DeviceCdrom0.c_str());
-	xbox::RtlInitAnsiString(&xDriveCdRom0, DriveCdRom0.c_str());
-	xbox::RtlInitAnsiString(&xDriveD, DriveD.c_str());
+	xbox::RtlInitAnsiStringHost(xDeviceCdRom0, DeviceCdrom0.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveCdRom0, DriveCdRom0.c_str());
+	xbox::RtlInitAnsiStringHost(xDriveD, DriveD.c_str());
 
 	xbox::PDEVICE_OBJECT CdRomDeviceObject;
-	xbox::ntstatus_xt result = xbox::IoCreateDevice(&xbox::CdRomDriverObject, 0, &xDeviceCdRom0, xbox::FILE_DEVICE_CD_ROM2, FALSE, &CdRomDeviceObject);
+	xbox::ntstatus_xt result = CxbxIoCreateDeviceFromHost(&xbox::CdRomDriverObject, 0, &xDeviceCdRom0, xbox::FILE_DEVICE_CD_ROM2, FALSE, &CdRomDeviceObject);
 	EmuBugCheckInline(result);
 
 
@@ -111,7 +111,7 @@ void EmuCdRomSetup(std::filesystem::path CdRomPath, int BootFlags)
 	RegisterXboxObject(CdRomDeviceObject, HostRootHandle);
 	RegisterXboxObject<true>(CdRomDeviceObject, HostRootHandle);
 
-	result = xbox::IoCreateSymbolicLink(&xDriveCdRom0, &xDeviceCdRom0);
+	result = CxbxIoCreateSymbolicLinkFromHost(xDriveCdRom0, xDeviceCdRom0);
 	EmuBugCheckInline(result);
 
 	// NOTE: below are incomplete reverse engineered, more research is needed to understand the initialization process.
@@ -143,7 +143,7 @@ void EmuCdRomSetup(std::filesystem::path CdRomPath, int BootFlags)
 	}
 
 	if (isEmuDisk) {
-		result = xbox::IoCreateSymbolicLink(&xDriveD, &xDeviceCdRom0);
+		result = CxbxIoCreateSymbolicLinkFromHost(xDriveD, xDeviceCdRom0);
 		EmuBugCheckInline(result);
 	}
 }

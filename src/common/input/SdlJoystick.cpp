@@ -68,6 +68,12 @@ namespace Sdl
 
 		if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC)) {
 			EmuLog(LOG_LEVEL::ERROR2, "Failed to initialize SDL subsystem! The error was: %s", SDL_GetError());
+			#if defined(CXBXR_UWP)
+			// The SDL module may be filtered by legacy settings. Always forward the
+			// actionable initialization reason through the embedding log callback.
+			EmuLogInit(LOG_LEVEL::ERROR2,
+				"UWP input: SDL initialization failed: %s", SDL_GetError());
+			#endif
 			InitStatus = INIT_ERROR;
 			lck.unlock();
 			Cv.notify_one();
@@ -100,6 +106,9 @@ namespace Sdl
 			}
 		}
 		InitStatus = INIT_SUCCESS;
+		#if defined(CXBXR_UWP)
+		EmuLogInit(LOG_LEVEL::INFO, "UWP input: SDL joystick subsystem initialized");
+		#endif
 		lck.unlock();
 		Cv.notify_one();
 

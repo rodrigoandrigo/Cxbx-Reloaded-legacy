@@ -386,6 +386,11 @@ xbox::void_xt xbox::KeInitializeThread(
 
 	/* Initialize the Mutant List */
 	InitializeListHead(&Thread->MutantListHead);
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread init: dispatcher and mutant lists initialized");
+	}
+#endif
 
 #if 0 // Not used or not yet reverse engineered
 	/* Set swap settings */
@@ -410,9 +415,28 @@ xbox::void_xt xbox::KeInitializeThread(
 	InitializeListHead(&Thread->ApcState.ApcListHead[xbox::KernelMode]);
 	InitializeListHead(&Thread->ApcState.ApcListHead[xbox::UserMode]);
 	Thread->KernelApcDisable = 0;
-	Thread->ApcState.Process = &KiUniqueProcess;
 	Thread->ApcState.ApcQueueable = TRUE;
-	Thread->ApcState.Process->ThreadQuantum = KiUniqueProcess.ThreadQuantum;
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		// KiInitSystem runs after the synthetic bootstrap thread is created, so
+		// KiUniqueProcessPointer is intentionally not allocated yet.  This host
+		// thread is never scheduled as Xbox code and does not belong to a guest
+		// process; keeping the field null matches that lifetime and avoids a null
+		// dereference during the UWP initialization sequence.
+		Thread->ApcState.Process = zeroptr;
+	}
+	else
+#endif
+	{
+		Thread->ApcState.Process = &KiUniqueProcess;
+		Thread->ApcState.Process->ThreadQuantum = KiUniqueProcess.ThreadQuantum;
+	}
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread init: APC state initialized (process=0x%08X)",
+			static_cast<unsigned>(reinterpret_cast<uintptr_t>(Thread->ApcState.Process)));
+	}
+#endif
 
 	/*
 	 * The bootstrap thread represents the native host thread; it is never
@@ -437,6 +461,11 @@ xbox::void_xt xbox::KeInitializeThread(
 
 	/* Initialize the Suspend Semaphore */
 	KeInitializeSemaphore(&Thread->SuspendSemaphore, 0, 2);
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread init: suspend semaphore initialized");
+	}
+#endif
 
 	/* Setup the timer */
 	xbox::KeInitializeTimer(&Thread->Timer);
@@ -450,6 +479,11 @@ xbox::void_xt xbox::KeInitializeThread(
 	/* Link the two wait lists together */
 	TimerWaitBlock->WaitListEntry.Flink = &Thread->Timer.Header.WaitListHead;
 	TimerWaitBlock->WaitListEntry.Blink = &Thread->Timer.Header.WaitListHead;
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread init: timer wait block initialized");
+	}
+#endif
 
 #if 0 // Not used or not yet reverse engineered
 	/* Set the TEB and process */
@@ -460,6 +494,11 @@ xbox::void_xt xbox::KeInitializeThread(
 	/* Set the Thread Stacks */
 	Thread->StackBase = KernelStack;
 	Thread->StackLimit = reinterpret_cast<PVOID>(reinterpret_cast<ulong_ptr_xt>(KernelStack) - KernelStackSize);
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread init: stack bounds initialized");
+	}
+#endif
 
 	/*
 	 * Only an Xbox-dispatched thread needs KiThreadStartup frames.  The UWP
