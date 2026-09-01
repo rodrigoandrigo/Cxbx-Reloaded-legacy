@@ -298,3 +298,41 @@ void CalcSHA1Hash(unsigned char digest[A_SHA_DIGEST_LEN], const unsigned char* d
 	SHA1Update(&ctx, data, len);
 	SHA1Final(digest, &ctx);
 }
+
+void CxbxHostHMAC(const uint8_t* key, uint32_t keyLength,
+	const uint8_t* data, uint32_t dataLength,
+	const uint8_t* data2, uint32_t data2Length,
+	uint8_t digest[A_SHA_DIGEST_LEN])
+{
+	if (keyLength > 64) {
+		keyLength = 64;
+	}
+
+	uint8_t innerPad[64]{};
+	uint8_t outerPad[64]{};
+	if (key != nullptr && keyLength != 0) {
+		memcpy(innerPad, key, keyLength);
+		memcpy(outerPad, key, keyLength);
+	}
+	for (size_t i = 0; i < 64; ++i) {
+		innerPad[i] ^= 0x36;
+		outerPad[i] ^= 0x5c;
+	}
+
+	SHA1_CTX context;
+	uint8_t innerDigest[A_SHA_DIGEST_LEN];
+	SHA1Init(&context);
+	SHA1Update(&context, innerPad, sizeof(innerPad));
+	if (data != nullptr && dataLength != 0) {
+		SHA1Update(&context, data, dataLength);
+	}
+	if (data2 != nullptr && data2Length != 0) {
+		SHA1Update(&context, data2, data2Length);
+	}
+	SHA1Final(innerDigest, &context);
+
+	SHA1Init(&context);
+	SHA1Update(&context, outerPad, sizeof(outerPad));
+	SHA1Update(&context, innerDigest, sizeof(innerDigest));
+	SHA1Final(digest, &context);
+}

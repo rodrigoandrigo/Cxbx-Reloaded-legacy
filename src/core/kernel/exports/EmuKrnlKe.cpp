@@ -81,6 +81,8 @@ namespace NtDll
 #include "EmuKrnlKe.h"
 #include "core\kernel\support\EmuFile.h" // For IsEmuHandle(), NtStatusToString()
 #include "core\kernel\support\NativeHandle.h"
+#include "core\kernel\memory-manager\VMManager.h"
+#include "core\kernel\memory-manager\GuestAllocation.h"
 #include "Timer.h"
 #include "Util.h"
 #include "devices/video/nv2a.h" // For NV2ADevice, NV_PCRTC_INTR_0_VBLANK
@@ -101,10 +103,15 @@ namespace NtDll
 typedef struct _DpcData {
 	CRITICAL_SECTION Lock;
 	std::atomic_flag IsDpcPending;
-	xbox::LIST_ENTRY DpcQueue; // TODO : Use KeGetCurrentPrcb()->DpcListHead instead
+	xbox::PLIST_ENTRY DpcQueue; // Guest-addressable sentinel; entries contain 32-bit links.
 } DpcData;
 
 DpcData g_DpcData = { 0 }; // Note : g_DpcData is initialized in InitDpcData()
+
+static xbox::PLIST_ENTRY DpcQueueHead()
+{
+	return g_DpcData.DpcQueue;
+}
 // Xbox has a single CPU, so DpcRoutineActive is effectively a system-wide flag.
 // We store it globally (not per-thread) so that all threads—including the
 // background DPC dispatch thread—see the same suppression state.
@@ -219,8 +226,22 @@ xbox::void_xt NTAPI xbox::KeSetSystemTime
 	LARGE_INTEGER DeltaTime;
 	PLIST_ENTRY ListHead, NextEntry;
 	PKTIMER Timer;
-	LIST_ENTRY TempList, TempList2;
+	LIST_ENTRY TempListStorage, TempList2Storage;
+	PLIST_ENTRY TempList = &TempListStorage;
+	PLIST_ENTRY TempList2 = &TempList2Storage;
 	ULONG Hand, i;
+
+#if defined(CXBXR_UWP)
+	const auto tempListsAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+		2 * sizeof(xbox::LIST_ENTRY), false);
+	if (tempListsAddress == 0) {
+		CxbxrAbort("KeSetSystemTime: unable to allocate guest-addressable temporary lists");
+		return;
+	}
+	TempList = reinterpret_cast<PLIST_ENTRY>(tempListsAddress);
+	TempList2 = TempList + 1;
+#endif
 
 	/* Sanity checks */
 	assert((NewTime->u.HighPart & 0xF0000000) == 0);
@@ -241,7 +262,7 @@ xbox::void_xt NTAPI xbox::KeSetSystemTime
 	KfLowerIrql(OldIrql2);
 
 	/* Setup a temporary list of absolute timers */
-	InitializeListHead(&TempList);
+	InitializeListHead(TempList);
 
 	/* Loop current timers */
 	for (i = 0; i < TIMER_TABLE_SIZE; i++)
@@ -262,19 +283,19 @@ xbox::void_xt NTAPI xbox::KeSetSystemTime
 				KiRemoveEntryTimer(Timer, i);
 
 				/* Insert it into our temporary list */
-				InsertTailList(&TempList, &Timer->TimerListEntry);
+				InsertTailList(TempList, &Timer->TimerListEntry);
 			}
 		}
 	}
 
 	/* Setup a temporary list of expired timers */
-	InitializeListHead(&TempList2);
+	InitializeListHead(TempList2);
 
 	/* Loop absolute timers */
-	while (TempList.Flink != &TempList)
+	while (TempList->Flink != TempList)
 	{
 		/* Get the timer */
-		Timer = CONTAINING_RECORD(TempList.Flink, KTIMER, TimerListEntry);
+		Timer = CONTAINING_RECORD(TempList->Flink, KTIMER, TimerListEntry);
 		RemoveEntryList(&Timer->TimerListEntry);
 
 		/* Update the due time and handle */
@@ -288,12 +309,17 @@ xbox::void_xt NTAPI xbox::KeSetSystemTime
 			KiRemoveEntryTimer(Timer, Hand);
 
 			/* Insert it into our temporary list */
-			InsertTailList(&TempList2, &Timer->TimerListEntry);
+			InsertTailList(TempList2, &Timer->TimerListEntry);
 		}
 	}
 
 	/* Process expired timers. This releases the dispatcher and timer locks, then it yields */
-	KiTimerListExpire(&TempList2, OldIrql);
+	KiTimerListExpire(TempList2, OldIrql);
+
+#if defined(CXBXR_UWP)
+	g_VMManager.DeallocateSystemMemory(
+		xbox::SystemMemoryType, tempListsAddress, 2 * sizeof(xbox::LIST_ENTRY));
+#endif
 }
 
 // ******************************************************************
@@ -388,15 +414,26 @@ xbox::void_xt xbox::KeInitializeThread(
 	Thread->ApcState.ApcQueueable = TRUE;
 	Thread->ApcState.Process->ThreadQuantum = KiUniqueProcess.ThreadQuantum;
 
-	/* Initialize the Suspend APC */
-	KeInitializeApc(
-		&Thread->SuspendApc,
-		Thread,
-		KiSuspendNop,
-		zeroptr,
-		KiSuspendThread,
-		KernelMode,
-		zeroptr);
+	/*
+	 * The bootstrap thread represents the native host thread; it is never
+	 * dispatched as Xbox code.  On an x64 UWP host, storing KiSuspendNop and
+	 * KiSuspendThread in the Xbox 32-bit KAPC fields truncates native function
+	 * pointers.  Leave the embedded APC zeroed for this synthetic thread.
+	 * Real Xbox threads still receive the complete APC initialization below.
+	 */
+#if defined(CXBXR_UWP)
+	if constexpr (!IsHostThread)
+#endif
+	{
+		KeInitializeApc(
+			&Thread->SuspendApc,
+			Thread,
+			KiSuspendNop,
+			zeroptr,
+			KiSuspendThread,
+			KernelMode,
+			zeroptr);
+	}
 
 	/* Initialize the Suspend Semaphore */
 	KeInitializeSemaphore(&Thread->SuspendSemaphore, 0, 2);
@@ -424,8 +461,23 @@ xbox::void_xt xbox::KeInitializeThread(
 	Thread->StackBase = KernelStack;
 	Thread->StackLimit = reinterpret_cast<PVOID>(reinterpret_cast<ulong_ptr_xt>(KernelStack) - KernelStackSize);
 
-	/* Initialize the Thread Context */
-	KiInitializeContextThread(Thread, TlsDataSize, SystemRoutine, StartRoutine, StartContext);
+	/*
+	 * Only an Xbox-dispatched thread needs KiThreadStartup frames.  The UWP
+	 * bootstrap thread executes on its existing native stack and never enters
+	 * the guest scheduler.  Building a guest frame for it would also truncate
+	 * the native KiThreadStartup address into the Xbox 32-bit RetAddr field.
+	 */
+#if defined(CXBXR_UWP)
+	if constexpr (IsHostThread) {
+		Thread->KernelStack = KernelStack;
+		Thread->TlsData = zeroptr;
+		Thread->NpxState = NPX_STATE_NOT_LOADED;
+	}
+	else
+#endif
+	{
+		KiInitializeContextThread(Thread, TlsDataSize, SystemRoutine, StartRoutine, StartContext);
+	}
 
 	/* Set the Thread to initialized */
 	Thread->State = Initialized;
@@ -504,10 +556,10 @@ void ExecuteDpcQueue(bool inline_dispatch)
 	}
 
 	// Are there entries in the DpqQueue?
-	while (!IsListEmpty(&(g_DpcData.DpcQueue)))
+	while (!IsListEmpty(DpcQueueHead()))
 	{
 		// Extract the head entry and retrieve the containing KDPC pointer for it:
-		pkdpc = CONTAINING_RECORD(RemoveHeadList(&(g_DpcData.DpcQueue)), xbox::KDPC, DpcListEntry);
+		pkdpc = CONTAINING_RECORD(RemoveHeadList(DpcQueueHead()), xbox::KDPC, DpcListEntry);
 		// Mark it as no longer linked into the DpcQueue
 		pkdpc->Inserted = FALSE;
 		// Set per-thread DpcRoutineActive for re-entrancy protection and
@@ -541,7 +593,14 @@ void InitDpcData()
 	// Let's initialize the Dpc handling thread too,
 	// here for now (should be called by our caller)
 	InitializeCriticalSection(&(g_DpcData.Lock));
-	InitializeListHead(&(g_DpcData.DpcQueue));
+	const auto dpcQueueAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::LIST_ENTRY), false);
+	if (dpcQueueAddress == 0) {
+		CxbxrAbort("InitDpcData: unable to allocate guest-addressable DPC queue");
+		return;
+	}
+	g_DpcData.DpcQueue = reinterpret_cast<xbox::PLIST_ENTRY>(dpcQueueAddress);
+	InitializeListHead(DpcQueueHead());
 }
 
 static constexpr uint32_t XBOX_TSC_FREQUENCY = 733333333; // Xbox Time Stamp Counter Frequency = 733333333 (CPU Clock)
@@ -1448,7 +1507,7 @@ XBSYSAPI EXPORTNUM(119) xbox::boolean_xt NTAPI xbox::KeInsertQueueDpc
 		Dpc->Inserted = TRUE;
 		Dpc->SystemArgument1 = SystemArgument1;
 		Dpc->SystemArgument2 = SystemArgument2;
-		InsertTailList(&(g_DpcData.DpcQueue), &(Dpc->DpcListEntry));
+		InsertTailList(DpcQueueHead(), &(Dpc->DpcListEntry));
 
 		// On real Xbox (single CPU), after queuing a DPC at PASSIVE_LEVEL,
 		// the DPC fires synchronously before KeInsertQueueDpc returns (via
@@ -1932,14 +1991,19 @@ XBSYSAPI EXPORTNUM(136) xbox::PLIST_ENTRY NTAPI xbox::KeRemoveQueue
 	}
 
 	// Blocking path — wait for an entry
-	KWAIT_BLOCK WaitBlock;
-	memset(&WaitBlock, 0, sizeof(WaitBlock));
-	WaitBlock.Thread = Thread;
-	WaitBlock.Object = Queue;
-	WaitBlock.WaitKey = (cshort_xt)X_STATUS_SUCCESS;
-	WaitBlock.WaitType = WaitAny;
+	GuestAllocation<KWAIT_BLOCK> waitBlockAllocation;
+	PKWAIT_BLOCK WaitBlock = waitBlockAllocation.get();
+	if (WaitBlock == nullptr) {
+		Queue->CurrentCount++;
+		KiUnlockDispatcherDatabase(orig_irql);
+		RETURN((PLIST_ENTRY)X_STATUS_INSUFFICIENT_RESOURCES);
+	}
+	WaitBlock->Thread = Thread;
+	WaitBlock->Object = Queue;
+	WaitBlock->WaitKey = (cshort_xt)X_STATUS_SUCCESS;
+	WaitBlock->WaitType = WaitAny;
 
-	Thread->WaitBlockList = &WaitBlock;
+	Thread->WaitBlockList = WaitBlock;
 	Thread->WaitStatus = X_STATUS_SUCCESS;
 	Thread->Alertable = FALSE;
 	Thread->WaitMode = (char_xt)WaitMode;
@@ -1949,16 +2013,16 @@ XBSYSAPI EXPORTNUM(136) xbox::PLIST_ENTRY NTAPI xbox::KeRemoveQueue
 
 	// Set up a timer for non-infinite timeouts so KiTimerExpiration can wake us
 	if (Timeout != zeroptr) {
-		KiSetupTimerWaitBlock(Thread, &WaitBlock, &WaitBlock);
+		KiSetupTimerWaitBlock(Thread, WaitBlock, WaitBlock);
 	} else {
-		WaitBlock.NextWaitBlock = &WaitBlock; // circular, no timer
+		WaitBlock->NextWaitBlock = WaitBlock; // circular, no timer
 	}
 
 	// Insert wait block into Queue's WaitListHead BEFORE starting the timer,
 	// to prevent a race where the timer DPC fires and KiUnlinkThread tries to
 	// RemoveEntryList on a WaitBlock not yet in any list.
 	KiWaitListLock();
-	InsertTailList(&Queue->Header.WaitListHead, &WaitBlock.WaitListEntry);
+	InsertTailList(&Queue->Header.WaitListHead, &WaitBlock->WaitListEntry);
 	KiWaitListUnlock();
 
 	// Now start the timer (if timeout specified)
@@ -1969,7 +2033,7 @@ XBSYSAPI EXPORTNUM(136) xbox::PLIST_ENTRY NTAPI xbox::KeRemoveQueue
 			// Timer already expired — remove the WaitBlock we just inserted
 			KiTimerUnlock();
 			KiWaitListLock();
-			RemoveEntryList(&WaitBlock.WaitListEntry);
+			RemoveEntryList(&WaitBlock->WaitListEntry);
 			KiWaitListUnlock();
 			Thread->WaitBlockList = zeroptr;
 			Thread->State = Running;
@@ -1983,7 +2047,7 @@ XBSYSAPI EXPORTNUM(136) xbox::PLIST_ENTRY NTAPI xbox::KeRemoveQueue
 	KiUnlockDispatcherDatabase(orig_irql);
 
 	// Use WaitApc with a missed-wakeup poll of EntryListHead
-	ntstatus_xt status = WaitApc<false>([Queue, &WaitBlock, Timeout](PKTHREAD WaitThread) -> std::optional<ntstatus_xt> {
+	ntstatus_xt status = WaitApc<false>([Queue, WaitBlock, Timeout](PKTHREAD WaitThread) -> std::optional<ntstatus_xt> {
 		if (WaitThread->State == Ready) {
 			return std::make_optional<ntstatus_xt>(WaitThread->WaitStatus);
 		}
@@ -1999,8 +2063,8 @@ XBSYSAPI EXPORTNUM(136) xbox::PLIST_ENTRY NTAPI xbox::KeRemoveQueue
 				Queue->Header.SignalState--;
 				Queue->CurrentCount++;
 				// Remove our wait block from the Queue's wait list
-				if (WaitBlock.WaitListEntry.Flink && WaitBlock.WaitListEntry.Flink->Blink == &WaitBlock.WaitListEntry) {
-					RemoveEntryList(&WaitBlock.WaitListEntry);
+				if (WaitBlock->WaitListEntry.Flink && WaitBlock->WaitListEntry.Flink->Blink == &WaitBlock->WaitListEntry) {
+					RemoveEntryList(&WaitBlock->WaitListEntry);
 				}
 				// Cancel the timer if one was set up (non-infinite timeout)
 				if (Timeout != zeroptr) {
@@ -2936,8 +3000,12 @@ XBSYSAPI EXPORTNUM(159) xbox::ntstatus_xt NTAPI xbox::KeWaitForSingleObject
 	// Wait Loop
 	// This loop ends 
 	PLARGE_INTEGER OriginalTime = Timeout;
-	KWAIT_BLOCK StackWaitBlock;
-	PKWAIT_BLOCK WaitBlock = &StackWaitBlock;
+	GuestAllocation<KWAIT_BLOCK> waitBlockAllocation;
+	PKWAIT_BLOCK WaitBlock = waitBlockAllocation.get();
+	if (WaitBlock == nullptr) {
+		KiUnlockDispatcherDatabase(Thread->WaitIrql);
+		RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
+	}
 	ntstatus_xt WaitStatus;
 	do {
 		// Check if we need to let an APC run. This should immediately trigger APC interrupt via a call to UnlockDispatcherDatabase

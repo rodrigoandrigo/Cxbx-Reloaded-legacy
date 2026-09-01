@@ -21,8 +21,9 @@ namespace xbox
 
 #define OB_NUMBER_HASH_BUCKETS          11
 typedef struct _OBJECT_DIRECTORY {
-	struct _OBJECT_HEADER_NAME_INFO *HashBuckets[OB_NUMBER_HASH_BUCKETS];
-} OBJECT_DIRECTORY, *POBJECT_DIRECTORY;
+	ptr_xt<struct _OBJECT_HEADER_NAME_INFO> HashBuckets[OB_NUMBER_HASH_BUCKETS];
+} OBJECT_DIRECTORY;
+using POBJECT_DIRECTORY = OBJECT_DIRECTORY*;
 
 typedef struct _OBJECT_DIRECTORY_INFORMATION {
 	OBJECT_STRING Name;
@@ -35,10 +36,11 @@ typedef struct _OBJECT_SYMBOLIC_LINK {
 } OBJECT_SYMBOLIC_LINK, *POBJECT_SYMBOLIC_LINK;
 
 typedef struct _OBJECT_HEADER_NAME_INFO {
-	struct _OBJECT_HEADER_NAME_INFO *ChainLink;
-	struct _OBJECT_DIRECTORY *Directory;
+	ptr_xt<struct _OBJECT_HEADER_NAME_INFO> ChainLink;
+	ptr_xt<struct _OBJECT_DIRECTORY> Directory;
 	OBJECT_STRING Name;
-} OBJECT_HEADER_NAME_INFO, *POBJECT_HEADER_NAME_INFO;
+} OBJECT_HEADER_NAME_INFO;
+using POBJECT_HEADER_NAME_INFO = OBJECT_HEADER_NAME_INFO*;
 
 #define ObDosDevicesDirectory()         ((HANDLE)-3)
 #define ObWin32NamedObjectsDirectory()  ((HANDLE)-4)
@@ -94,7 +96,13 @@ ntstatus_xt ObpReferenceObjectByName(
 	(p)->ObjectName = n;      \
 }
 
+#if defined(CXBXR_UWP)
+extern PKEVENT ObpDefaultObjectPointer;
+inline PKEVENT ObpDefaultObjectAddress() { return ObpDefaultObjectPointer; }
+#else
 extern KEVENT ObpDefaultObject;
+inline PKEVENT ObpDefaultObjectAddress() { return &ObpDefaultObject; }
+#endif
 boolean_xt ObInitSystem();
 boolean_xt ObpExtendObjectHandleTable();
 void_xt ObDissectName(OBJECT_STRING Path, POBJECT_STRING FirstName, POBJECT_STRING RemainingName);
@@ -174,13 +182,19 @@ XBSYSAPI EXPORTNUM(244) ntstatus_xt NTAPI ObOpenObjectByPointer
 #define OB_TABLES_PER_SEGMENT           8
 #define OB_HANDLES_PER_SEGMENT          (OB_TABLES_PER_SEGMENT * OB_HANDLES_PER_TABLE)
 
+using PPVOID = ptr_xt<PVOID>;
+using PPPVOID = ptr_xt<PPVOID>;
+
 typedef struct _OBJECT_HANDLE_TABLE {
 	long_xt HandleCount;
 	long_ptr_xt FirstFreeTableEntry;
 	HANDLE NextHandleNeedingPool;
-	PVOID **RootTable;
-	PVOID *BuiltinRootTable[OB_TABLES_PER_SEGMENT];
+	PPPVOID RootTable;
+	PPVOID BuiltinRootTable[OB_TABLES_PER_SEGMENT];
 } OBJECT_HANDLE_TABLE, *POBJECT_HANDLE_TABLE;
+
+static_assert(sizeof(PPVOID) == sizeof(addr_xt),
+	"Xbox object-table roots must contain 32-bit guest pointers");
 
 // ******************************************************************
 // * 0x00F5 - ObpObjectHandleTable
@@ -242,5 +256,3 @@ XBSYSAPI EXPORTNUM(251) void_xt FASTCALL ObfReferenceObject
 }
 
 #endif
-
-

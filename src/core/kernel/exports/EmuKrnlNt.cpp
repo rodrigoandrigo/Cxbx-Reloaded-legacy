@@ -51,6 +51,7 @@ namespace NtDll
 #include "core/kernel/support/NativeHandle.h" // For Xbox objects to native handle and back
 #include "core\kernel\memory-manager\VMManager.h" // For g_VMManager
 #include "core\kernel\support\NativeHandle.h"
+#include "core\kernel\memory-manager\GuestAllocation.h"
 #include "devices\Xbox.h"
 #include "CxbxDebugger.h"
 
@@ -242,8 +243,12 @@ XBSYSAPI EXPORTNUM(184) xbox::ntstatus_xt NTAPI xbox::NtAllocateVirtualMemory
 		LOG_FUNC_ARG_TYPE(PROTECTION_TYPE, Protect)
 	LOG_FUNC_END;
 
-	NTSTATUS ret = g_VMManager.XbAllocateVirtualMemory((VAddr*)BaseAddress, ZeroBits, (size_t*)AllocationSize,
-		AllocationType, Protect);
+	// Xbox SIZE_T/PULONG storage is 32-bit. Never expose it as a native x64
+	// size_t*, which would read and write eight bytes in guest memory.
+	size_t nativeAllocationSize = *AllocationSize;
+	NTSTATUS ret = g_VMManager.XbAllocateVirtualMemory((VAddr*)BaseAddress, ZeroBits,
+		&nativeAllocationSize, AllocationType, Protect);
+	*AllocationSize = static_cast<xbox::ulong_xt>(nativeAllocationSize);
 
 	RETURN(ret);
 }
@@ -998,7 +1003,9 @@ XBSYSAPI EXPORTNUM(199) xbox::ntstatus_xt NTAPI xbox::NtFreeVirtualMemory
 		LOG_FUNC_ARG_TYPE(ALLOCATION_TYPE, FreeType)
 	LOG_FUNC_END;
 
-	NTSTATUS ret = g_VMManager.XbFreeVirtualMemory((VAddr*)BaseAddress, (size_t*)FreeSize, FreeType);
+	size_t nativeFreeSize = *FreeSize;
+	NTSTATUS ret = g_VMManager.XbFreeVirtualMemory((VAddr*)BaseAddress, &nativeFreeSize, FreeType);
+	*FreeSize = static_cast<xbox::ulong_xt>(nativeFreeSize);
 
 	RETURN(ret);
 }
@@ -1125,7 +1132,9 @@ XBSYSAPI EXPORTNUM(204) xbox::ntstatus_xt NTAPI xbox::NtProtectVirtualMemory
 
 
 	DWORD Perms = NewProtect;
-	NTSTATUS ret = g_VMManager.XbVirtualProtect((VAddr*)BaseAddress, (size_t*)RegionSize, &Perms);
+	size_t nativeRegionSize = *RegionSize;
+	NTSTATUS ret = g_VMManager.XbVirtualProtect((VAddr*)BaseAddress, &nativeRegionSize, &Perms);
+	*RegionSize = static_cast<xbox::size_xt>(nativeRegionSize);
 	*OldProtect = Perms;
 
 	RETURN(ret);
@@ -3179,7 +3188,14 @@ XBSYSAPI EXPORTNUM(235) xbox::ntstatus_xt NTAPI xbox::NtWaitForMultipleObjectsEx
 		}
 	}
 
-	KWAIT_BLOCK WaitBlockArray[X_MAXIMUM_WAIT_OBJECTS];
+	GuestAllocation<KWAIT_BLOCK, X_MAXIMUM_WAIT_OBJECTS> waitBlockAllocation;
+	PKWAIT_BLOCK WaitBlockArray = waitBlockAllocation.get();
+	if (WaitBlockArray == nullptr) {
+		for (ulong_xt i = 0; i < Count; ++i) {
+			ObfDereferenceObject(Objects[i]);
+		}
+		RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
+	}
 	ntstatus_xt ret;
 	if (Count == 1) {
 		ret = KeWaitForSingleObject(WaitObjects[0], UserRequest, WaitMode, Alertable, Timeout);

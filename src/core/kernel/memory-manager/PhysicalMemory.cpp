@@ -38,7 +38,7 @@
 // https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/singly-and-doubly-linked-lists
 #define LIST_ENTRY_INITIALIZE(ListEntry) ((ListEntry)->Flink = (ListEntry)->Blink = nullptr)
 
-inline FreeBlock* ListEntryToFreeBlock(xbox::PLIST_ENTRY pListEntry)
+inline FreeBlock* ListEntryToFreeBlock(HostListEntry* pListEntry)
 {
 	return CONTAINING_RECORD(pListEntry, FreeBlock, ListEntry);
 }
@@ -165,7 +165,7 @@ void PhysicalMemory::WritePte(xbox::PMMPTE pPteStart, xbox::PMMPTE pPteEnd, xbox
 
 bool PhysicalMemory::RemoveFree(xbox::PFN_COUNT NumberOfPages, xbox::PFN* result, xbox::PFN_COUNT PfnAlignment, xbox::PFN start, xbox::PFN end)
 {
-	xbox::PLIST_ENTRY ListEntry;
+	HostListEntry* ListEntry;
 	xbox::PFN PfnStart;
 	xbox::PFN PfnEnd;
 	xbox::PFN IntersectionStart;
@@ -238,7 +238,7 @@ bool PhysicalMemory::RemoveFree(xbox::PFN_COUNT NumberOfPages, xbox::PFN* result
 					{
 						// delete the entry if there is no free space left
 
-						RemoveEntryList(ListEntry);
+						HostRemoveEntryList(ListEntry);
 						delete ListEntryToFreeBlock(ListEntry);
 					}
 					else { ListEntryToFreeBlock(ListEntry)->size = PfnCount; }
@@ -251,14 +251,14 @@ bool PhysicalMemory::RemoveFree(xbox::PFN_COUNT NumberOfPages, xbox::PFN* result
 					block->start = IntersectionEnd + 1;
 					block->size = PfnStart + PfnCount - IntersectionEnd - 1;
 					LIST_ENTRY_INITIALIZE(&block->ListEntry);
-					InsertHeadList(ListEntry, &block->ListEntry);
+					HostInsertHeadList(ListEntry, &block->ListEntry);
 
 					PfnCount = IntersectionEnd - PfnStart - NumberOfPages + 1;
 					if (!PfnCount)
 					{
 						// delete the entry if there is no free space left
 
-						RemoveEntryList(ListEntry);
+						HostRemoveEntryList(ListEntry);
 						delete ListEntryToFreeBlock(ListEntry);
 					}
 					else { ListEntryToFreeBlock(ListEntry)->size = PfnCount; }
@@ -283,7 +283,7 @@ bool PhysicalMemory::RemoveFree(xbox::PFN_COUNT NumberOfPages, xbox::PFN* result
 					block->start = IntersectionEnd + 1;
 					block->size = PfnStart + PfnCount - IntersectionEnd - 1;
 					LIST_ENTRY_INITIALIZE(&block->ListEntry);
-					InsertHeadList(ListEntry, &block->ListEntry);
+					HostInsertHeadList(ListEntry, &block->ListEntry);
 
 					PfnCount = IntersectionEnd - PfnStart - NumberOfPages + 1;
 					ListEntryToFreeBlock(ListEntry)->size = PfnCount;
@@ -309,7 +309,7 @@ bool PhysicalMemory::RemoveFree(xbox::PFN_COUNT NumberOfPages, xbox::PFN* result
 
 void PhysicalMemory::InsertFree(xbox::PFN start, xbox::PFN end)
 {
-	xbox::PLIST_ENTRY ListEntry;
+	HostListEntry* ListEntry;
 	xbox::PFN_COUNT size = end - start + 1;
 
 	ListEntry = FreeList.Blink; // search from the top
@@ -322,7 +322,7 @@ void PhysicalMemory::InsertFree(xbox::PFN start, xbox::PFN end)
 			block->start = start;
 			block->size = size;
 			LIST_ENTRY_INITIALIZE(&block->ListEntry);
-			InsertHeadList(ListEntry, &block->ListEntry);
+			HostInsertHeadList(ListEntry, &block->ListEntry);
 
 			// Ensure that we are not freeing a part of the previous block
 			if (ListEntry != &FreeList) {
@@ -342,10 +342,10 @@ void PhysicalMemory::InsertFree(xbox::PFN start, xbox::PFN end)
 				start + size == ListEntryToFreeBlock(ListEntry->Flink)->start)
 			{
 				// Merge forward
-				xbox::PLIST_ENTRY temp = ListEntry->Flink;
+				HostListEntry* temp = ListEntry->Flink;
 				ListEntryToFreeBlock(ListEntry)->size +=
 					ListEntryToFreeBlock(temp)->size;
-				RemoveEntryList(temp);
+				HostRemoveEntryList(temp);
 				delete ListEntryToFreeBlock(temp);
 			}
 			if (ListEntry->Blink != &FreeList &&
@@ -355,7 +355,7 @@ void PhysicalMemory::InsertFree(xbox::PFN start, xbox::PFN end)
 				// Merge backward
 				ListEntryToFreeBlock(ListEntry->Blink)->size +=
 					ListEntryToFreeBlock(ListEntry)->size;
-				RemoveEntryList(ListEntry);
+				HostRemoveEntryList(ListEntry);
 				delete block;
 			}
 

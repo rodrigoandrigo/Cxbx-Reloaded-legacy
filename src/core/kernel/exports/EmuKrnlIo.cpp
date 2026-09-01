@@ -1341,9 +1341,6 @@ xbox::ntstatus_xt IopQueryDeviceInformation
 	/* Reference the object */
 	ObfReferenceObject(FileObject);
 
-	KEVENT Event;
-	bool LocalEvent = false;
-
 	/* Check if this is a file that was opened for Synch I/O */
 	if (FileObject->Flags & FO_SYNCHRONOUS_IO) {
 		/* Lock it */
@@ -1352,11 +1349,9 @@ xbox::ntstatus_xt IopQueryDeviceInformation
 		/* Use File Object event */
 		NtClearEvent(&FileObject->Event);
 	}
-	else {
-		/* Use local event */
-		KeInitializeEvent(&Event, SynchronizationEvent, false);
-		LocalEvent = true;
-	}
+	// The unfinished asynchronous IRP path previously initialized a local
+	// Xbox KEVENT on the native stack, then never used it. Besides being dead
+	// code, its 32-bit list links cannot point at an x64 stack address.
 
 	// Which then lead to bunch of irp work. For now we just map to Windows' file system call.
 	LOG_INCOMPLETE();

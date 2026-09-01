@@ -214,6 +214,15 @@ typedef struct CxbxEmbedConfig {
 	CxbxEmbedBrokeredStorage brokered_storage;
 } CxbxEmbedConfig;
 
+#if defined(__cplusplus) && defined(_WIN64)
+static_assert(sizeof(void*) == 8, "The UWP embedding ABI requires an x64 host");
+static_assert(sizeof(CxbxEmbedStorageHandle) == 8, "Brokered handles are always 64-bit");
+static_assert(sizeof(CxbxEmbedD3D11Presentation) == 56, "Unexpected x64 D3D ABI packing");
+static_assert(sizeof(CxbxEmbedCallbacks) == 56, "Unexpected x64 callback ABI packing");
+static_assert(sizeof(CxbxEmbedBrokeredStorage) == 72, "Unexpected x64 storage ABI packing");
+static_assert(sizeof(CxbxEmbedConfig) == 168, "Unexpected x64 configuration ABI packing");
+#endif
+
 CXBX_EMBED_API CxbxEmbedResult CXBX_EMBED_CALL CxbxEmbed_Create(
 	const CxbxEmbedConfig* config, const CxbxEmbedCallbacks* callbacks, CxbxEmbedInstance** instance);
 CXBX_EMBED_API CxbxEmbedResult CXBX_EMBED_CALL CxbxEmbed_InitializeAsync(CxbxEmbedInstance* instance);

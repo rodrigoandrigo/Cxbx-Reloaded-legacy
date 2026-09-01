@@ -41,6 +41,7 @@
 
 #include "EmuEEPROM.h" // For EEPROMInfo, EEPROMInfos
 #include "core\kernel\support\Emu.h" // For EmuWarning
+#include "common\crypto\EmuSha.h"
 #include "..\..\src\devices\LED.h" // For SetLEDSequence
 
 xbox::XBOX_EEPROM *EEPROM = nullptr; // Set using CxbxRestoreEEPROM()
@@ -263,7 +264,8 @@ xbox::XBOX_EEPROM *CxbxRestoreEEPROM(char *szFilePath_EEPROM_bin)
 
 	// Verify the checksum of the eeprom header
 	UCHAR Checksum[20] = { 0 };
-	xbox::XcHMAC(xbox::XboxEEPROMKey, 16, pEEPROM->EncryptedSettings.Confounder, 8, pEEPROM->EncryptedSettings.HDKey, 20, Checksum);
+	CxbxHostHMAC(xbox::XboxEEPROMKey, 16, pEEPROM->EncryptedSettings.Confounder, 8,
+		pEEPROM->EncryptedSettings.HDKey, 20, Checksum);
 	if (memcmp(Checksum, pEEPROM->EncryptedSettings.Checksum, 20))
 	{
 		// The checksums do not match. Log this error and flash the LED (red, off, red, off)
@@ -317,7 +319,8 @@ void EmuEEPROMReset(xbox::XBOX_EEPROM* eeprom)
 		eeprom->EncryptedSettings.HDKey[i] = randomDis(gen);
 	}
 
-	xbox::XcHMAC(xbox::XboxEEPROMKey, 16, eeprom->EncryptedSettings.Confounder, 8, eeprom->EncryptedSettings.HDKey, 20, eeprom->EncryptedSettings.Checksum);
+	CxbxHostHMAC(xbox::XboxEEPROMKey, 16, eeprom->EncryptedSettings.Confounder, 8,
+		eeprom->EncryptedSettings.HDKey, 20, eeprom->EncryptedSettings.Checksum);
 
 	// User Settings
 	eeprom->UserSettings.Language = XC_LANGUAGE_ENGLISH;  // = English

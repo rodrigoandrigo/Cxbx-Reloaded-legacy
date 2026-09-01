@@ -242,7 +242,14 @@ struct DSBUFFER_S : CUnknownTemplate {
         init_member();
         dsb_c.p_CMcpxVoiceClient = new CMcpxVoiceClient(); dsb_i.p_CMcpxVoiceClient = dsb_c.p_CMcpxVoiceClient;
         dsb_c.p_CDSVoice = new CDirectSoundVoice(is3D); dsb_i.p_CDSVoice = dsb_c.p_CDSVoice;
+#if defined(CXBXR_UWP)
+        // SharedDSBuffer is a native heap object in the x64 port. Publishing a
+        // truncated self-pointer as an Xbox address is invalid; these unknown
+        // fields are not consumed by the implemented HLE paths.
+        dsb_c.p_unknown_18 = xbox::zero;
+#else
         dsb_c.p_unknown_18 = reinterpret_cast<xbox::addr_xt>(&dsb_c.p_unknown_14);
+#endif
         dsb_c.p_unknown_14 = dsb_c.p_unknown_18;
     }
 };

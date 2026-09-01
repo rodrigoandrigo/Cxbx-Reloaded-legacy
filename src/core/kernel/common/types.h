@@ -1222,8 +1222,7 @@ typedef struct _KEVENT
 {
 	DISPATCHER_HEADER Header;
 }
-//KEVENT, *PKEVENT, *RESTRICTED_POINTER PRKEVENT;
-KEVENT, *PKEVENT, *PRKEVENT; // even with undefined RESTRICTED_POINTER, this doesn't compile
+KEVENT, *PKEVENT, *PRKEVENT;
 
 // ******************************************************************
 // EVENT_BASIC_INFORMATION - same as Windows

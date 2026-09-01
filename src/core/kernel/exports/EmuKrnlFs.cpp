@@ -39,6 +39,8 @@ namespace NtDll
 };
 
 #include "core\kernel\support\Emu.h" // For EmuLog(LOG_LEVEL::WARNING, )
+#include "core\kernel\memory-manager\VMManager.h"
+#include "core\kernel\init\CxbxKrnl.h"
 
 #define FSCACHE_MAXIMUM_NUMBER_OF_CACHE_PAGES 2048
 
@@ -65,11 +67,25 @@ XBSYSAPI EXPORTNUM(36) xbox::void_xt NTAPI xbox::FscInvalidateIdleBlocks()
 	LOG_UNIMPLEMENTED();
 }
 
-static xbox::KEVENT g_FscCacheEvent;
+#if defined(CXBXR_UWP)
+static xbox::PKEVENT g_FscCacheEvent = xbox::zeroptr;
+#else
+static xbox::KEVENT g_FscCacheEventStorage;
+static xbox::PKEVENT g_FscCacheEvent = &g_FscCacheEventStorage;
+#endif
 
 xbox::void_xt xbox::InitializeFscCacheEvent()
 {
-    KeInitializeEvent(&g_FscCacheEvent, SynchronizationEvent, TRUE);
+#if defined(CXBXR_UWP)
+	const auto eventAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::KEVENT), false);
+	if (eventAddress == 0) {
+		CxbxrAbort("InitializeFscCacheEvent: unable to allocate guest-addressable event");
+		return;
+	}
+	g_FscCacheEvent = reinterpret_cast<xbox::PKEVENT>(eventAddress);
+#endif
+    KeInitializeEvent(g_FscCacheEvent, SynchronizationEvent, TRUE);
 }
 
 // ******************************************************************
@@ -83,7 +99,7 @@ XBSYSAPI EXPORTNUM(37) xbox::ntstatus_xt NTAPI xbox::FscSetCacheSize
 	LOG_FUNC_ONE_ARG(NumberOfCachePages);
 
 	NTSTATUS ret = X_STATUS_SUCCESS;
-	KeWaitForSingleObject(&g_FscCacheEvent, Executive, 0, 0, 0);
+	KeWaitForSingleObject(g_FscCacheEvent, Executive, 0, 0, 0);
 	UCHAR orig_irql = KeRaiseIrqlToDpcLevel();
 
 	if (NumberOfCachePages > FSCACHE_MAXIMUM_NUMBER_OF_CACHE_PAGES) {
@@ -103,7 +119,6 @@ XBSYSAPI EXPORTNUM(37) xbox::ntstatus_xt NTAPI xbox::FscSetCacheSize
 	}
 
 	KfLowerIrql(orig_irql);
-	KeSetEvent(&g_FscCacheEvent, 0, 0);
+	KeSetEvent(g_FscCacheEvent, 0, 0);
 	RETURN(ret);
 }
-

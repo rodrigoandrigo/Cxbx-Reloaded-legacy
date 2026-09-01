@@ -42,7 +42,13 @@ typedef struct _POOL_DESCRIPTOR {
 	xbox::ulong_xt RunningDeAllocs;
 	xbox::ulong_xt TotalPages;
 	xbox::ulong_xt TotalBigPages;
+#if defined(CXBXR_UWP)
+	// The Xbox list helpers use 32-bit guest pointers. Keep their sentinel
+	// nodes in guest-addressable memory instead of inside the x64 DLL object.
+	xbox::PLIST_ENTRY ListHeads;
+#else
 	xbox::LIST_ENTRY ListHeads[POOL_LIST_HEADS];
+#endif
 } POOL_DESCRIPTOR, *PPOOL_DESCRIPTOR;
 
 

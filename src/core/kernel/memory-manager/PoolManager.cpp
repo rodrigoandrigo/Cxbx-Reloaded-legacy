@@ -51,6 +51,18 @@ void PoolManager::InitializePool()
 	m_NonPagedPoolDescriptor.TotalPages = 0;
 	m_NonPagedPoolDescriptor.TotalBigPages = 0;
 
+#if defined(CXBXR_UWP)
+	const VAddr listHeadsAddress = g_VMManager.AllocateSystemMemory(
+		xbox::PoolType, XBOX_PAGE_READWRITE,
+		POOL_LIST_HEADS * sizeof(xbox::LIST_ENTRY), false);
+	if (listHeadsAddress == 0) {
+		CxbxrAbort("PoolManager: unable to allocate guest list heads");
+		return;
+	}
+	m_NonPagedPoolDescriptor.ListHeads =
+		reinterpret_cast<xbox::PLIST_ENTRY>(listHeadsAddress);
+#endif
+
 	for (Index = 0; Index < POOL_LIST_HEADS; Index++) {
 		InitializeListHead(&m_NonPagedPoolDescriptor.ListHeads[Index]);
 	}
@@ -123,6 +135,7 @@ VAddr PoolManager::AllocatePool(size_t Size, uint32_t Tag)
 		LookasideList = &m_ExpSmallNPagedPoolLookasideLists[NeededSize - 1];
 		LookasideList->TotalAllocates += 1;
 
+#if !defined(CXBXR_UWP)
 		Entry = reinterpret_cast<PPOOL_HEADER>(xbox::KRNL(InterlockedPopEntrySList(&LookasideList->ListHead)));
 
 		if (Entry != nullptr) {
@@ -137,6 +150,7 @@ VAddr PoolManager::AllocatePool(size_t Size, uint32_t Tag)
 
 			RETURN(reinterpret_cast<VAddr>(Entry) + POOL_OVERHEAD);
 		}
+#endif
 	}
 
 	Lock();
@@ -287,12 +301,14 @@ void PoolManager::DeallocatePool(VAddr addr)
 	if (Index <= POOL_SMALL_LISTS) {
 		LookasideList = &m_ExpSmallNPagedPoolLookasideLists[Index - 1];
 
+#if !defined(CXBXR_UWP)
 		if (QUERY_DEPTH_SLIST(&LookasideList->ListHead) < LookasideList->Depth) {
 			Entry += 1;
 			xbox::KRNL(InterlockedPushEntrySList)(&LookasideList->ListHead, reinterpret_cast<xbox::PSINGLE_LIST_ENTRY>(Entry));
 
 			return;
 		}
+#endif
 	}
 
 	Lock();

@@ -242,6 +242,13 @@ std::unique_ptr<AffinityPolicy> AffinityPolicy::InitPolicy()
 {
 	std::unique_ptr<AffinityPolicy> result;
 
+	#if defined(CXBXR_UWP)
+	// CPU-set and process-affinity policy is a desktop host optimization. The
+	// embedded AppContainer must leave scheduling under the UWP/Xbox host; some
+	// systems expose the entry points but reject or return incomplete CPU-set
+	// data. A neutral policy also keeps later thread calls safe and non-null.
+	return std::make_unique<EmptyPolicy>();
+	#else
 	if (!g_UseAllCores) {
 		if (auto win10Policy = std::make_unique<Win10Policy>(); win10Policy->Initialize()) {
 			result = std::move(win10Policy);
@@ -255,6 +262,7 @@ std::unique_ptr<AffinityPolicy> AffinityPolicy::InitPolicy()
 	}
 
 	return result;
+	#endif
 }
 
 void AffinityPolicy::SetAffinityXbox() const {

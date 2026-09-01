@@ -266,7 +266,10 @@ void UploadPixelContainerMips(
 
 			// If this is the final mip of the first cube face, set the cube face size
 			if (face == D3DCUBEMAP_FACE_POSITIVE_X && mipmap_level >= dwMipMapLevels - 1) {
-				actualSlicePitch = ROUND_UP(((UINT)pSrc + mipSlicePitch) - (UINT)VirtualAddr, X_D3DTEXTURE_CUBEFACE_ALIGNMENT);
+				const size_t sourceOffset = static_cast<size_t>(
+					reinterpret_cast<uintptr_t>(pSrc) - static_cast<uintptr_t>(VirtualAddr));
+				actualSlicePitch = static_cast<UINT>(ROUND_UP(
+					sourceOffset + mipSlicePitch, X_D3DTEXTURE_CUBEFACE_ALIGNMENT));
 			}
 
 			// Copy texture data to the host resource
@@ -314,4 +317,3 @@ void UploadPixelContainerMips(
 	} // for cube faces
 
 }
-

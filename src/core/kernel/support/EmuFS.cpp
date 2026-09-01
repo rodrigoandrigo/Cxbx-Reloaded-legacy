@@ -35,6 +35,7 @@
 #include "core\kernel\support\EmuFS.h" // For fs_instruction_t
 #include "core\kernel\support\NativeHandle.h"
 #include "core\kernel\init\CxbxKrnl.h"
+#include "core\kernel\memory-manager\VMManager.h"
 #include "Logging.h"
 
 #include <windows.h>
@@ -735,9 +736,27 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 	// Allocate the xbox KPCR structure
 	base = xbox::zeroptr;
 	size = sizeof(xbox::KPCR);
+	#if defined(CXBXR_UWP)
+	{
+		VAddr nativeBase = 0;
+		size_t nativeSize = size;
+		const NTSTATUS status = g_VMManager.XbAllocateVirtualMemory(&nativeBase, 0,
+			&nativeSize, XBOX_MEM_RESERVE | XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+		if (status != X_STATUS_SUCCESS) {
+			CxbxrAbort("EmuGenerateFS: unable to allocate guest KPCR (status=0x%08X)", status);
+			return;
+		}
+		base = reinterpret_cast<xbox::PVOID>(static_cast<uintptr_t>(nativeBase));
+		size = static_cast<xbox::ulong_xt>(nativeSize);
+	}
+	#else
 	xbox::NtAllocateVirtualMemory(&base, 0, &size, XBOX_MEM_RESERVE | XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+	#endif
 	xbox::KPCR *NewPcr = (xbox::KPCR*)base;
 	xbox::RtlZeroMemory(NewPcr, sizeof(xbox::KPCR));
+	#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KPCR allocated at 0x%08X", static_cast<unsigned>(reinterpret_cast<uintptr_t>(NewPcr)));
+	#endif
 	xbox::NT_TIB *XbTib = &(NewPcr->NtTib);
 	xbox::PKPRCB Prcb = &(NewPcr->PrcbData);
 	// Note : As explained above (at EmuKeSetPcr), Cxbx cannot allocate one NT_TIB and KPRCB
@@ -755,9 +774,16 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 	// Copy the Nt TIB over to the emulated TIB :
 	NT_TIB* hTib = GetNtTib();
 	{
+	#if defined(CXBXR_UWP)
+		// A native x64 NT_TIB is larger and has a different layout from the
+		// 32-bit Xbox NT_TIB. Copying sizeof(NT_TIB) corrupts the KPCR fields
+		// that follow it. The TCG/UWP path only needs the guest self pointer.
+		NewPcr->NtTib.Self = XbTib;
+	#else
 		memcpy(XbTib, hTib, sizeof(NT_TIB));
 		// Fixup the TIB self pointer :
 		NewPcr->NtTib.Self = XbTib;
+	#endif
 
 		// NOTE: The actual issue was TlsData was not within Host's stack which is now implemented.
 		//       But instead of direct Host's stack, (which should not be tampered from Host's kernel stack block!)
@@ -775,6 +801,9 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 		//__writefsdword(TIB_StackBase, (DWORD)NewPcr->NtTib.StackBase);
 		//__writefsdword(TIB_StackLimit, (DWORD)NewPcr->NtTib.StackLimit);
 	}
+	#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: guest TIB initialized");
+	#endif
 
 	// Set flat address of this PCR
 	NewPcr->SelfPcr = NewPcr;
@@ -799,24 +828,56 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 
 		base = xbox::zeroptr;
 		size = sizeof(xbox::ETHREAD);
+	#if defined(CXBXR_UWP)
+		{
+			VAddr nativeBase = 0;
+			size_t nativeSize = size;
+			const NTSTATUS status = g_VMManager.XbAllocateVirtualMemory(&nativeBase, 0,
+				&nativeSize, XBOX_MEM_RESERVE | XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+			if (status != X_STATUS_SUCCESS) {
+				CxbxrAbort("EmuGenerateFS: unable to allocate guest ETHREAD (status=0x%08X)", status);
+				return;
+			}
+			base = reinterpret_cast<xbox::PVOID>(static_cast<uintptr_t>(nativeBase));
+			size = static_cast<xbox::ulong_xt>(nativeSize);
+		}
+	#else
 		xbox::NtAllocateVirtualMemory(&base, 0, &size, XBOX_MEM_RESERVE | XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+	#endif
 		Ethread = (xbox::PETHREAD)base;
 		xbox::RtlZeroMemory(Ethread, sizeof(xbox::ETHREAD)); // Clear, to prevent side-effects on random contents
+	#if defined(CXBXR_UWP)
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: ETHREAD allocated at 0x%08X", static_cast<unsigned>(reinterpret_cast<uintptr_t>(Ethread)));
+	#endif
 		// Initialize the IRP tracking list for this thread
 		InitializeListHead(&Ethread->IrpList);
 		// Emulate kernel stack size as we can't use exact size.
+	#if defined(CXBXR_UWP)
+		xbox::ulong_xt KernelStackSize = KERNEL_STACK_SIZE;
+		xbox::PVOID KernelStack = xbox::MmCreateKernelStack(KernelStackSize, FALSE);
+		if (KernelStack == xbox::zeroptr) {
+			CxbxrAbort("EmuGenerateFS: unable to allocate guest kernel stack");
+			return;
+		}
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: kernel stack allocated at 0x%08X", static_cast<unsigned>(reinterpret_cast<uintptr_t>(KernelStack)));
+	#else
 		xbox::ulong_xt KernelStackSize = Host2XbStackBaseReserved - reinterpret_cast<xbox::ulong_xt>(hTib->StackLimit);
+		xbox::PVOID KernelStack = (xbox::PVOID)Host2XbStackBaseReserved;
+	#endif
 		// Since the cxbxr's kernel initialization occur there, we do not create a new thread
 		// and therefore doesn't need to set any additional System/Start details set in the xbox's kernel stack.
 		xbox::KeInitializeThread<IsHostThread>(
 			&Ethread->Tcb,
-			(xbox::PVOID)Host2XbStackBaseReserved,
+			KernelStack,
 			KernelStackSize,
 			xbox::zero,
 			xbox::zeroptr,  // Unused (SystemRoutine)
 			xbox::zeroptr,  // Unused (StartRoutine)
 			xbox::zeroptr,  // Unused (StartContext)
 			xbox::zeroptr); // Unused (&KiUniqueProcess)
+	#if defined(CXBXR_UWP)
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KeInitializeThread completed");
+	#endif
 	}
 #ifndef ENABLE_KTHREAD_SWITCHING
 	else {

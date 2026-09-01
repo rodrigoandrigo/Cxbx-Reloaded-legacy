@@ -107,42 +107,8 @@ xbox::void_xt NTAPI JumpedHMAC
 	xbox::PBYTE HmacData
 )
 {
-	if (cbKeyMaterial > 64) {
-		cbKeyMaterial = 64;
-	}
-
-	BYTE Pad1[64];
-	RtlZeroMemory(Pad1, 64);
-	RtlCopyMemory(Pad1, pbKeyMaterial, cbKeyMaterial);
-
-	BYTE Pad2[64];
-	RtlZeroMemory(Pad2, 64);
-	RtlCopyMemory(Pad2, pbKeyMaterial, cbKeyMaterial);
-
-	for (ULONG dwBlock = 0; dwBlock< 64 / sizeof(DWORD); dwBlock++) {
-		((DWORD*)Pad1)[dwBlock] ^= ((DWORD)0x36363636);
-		((DWORD*)Pad2)[dwBlock] ^= ((DWORD)0x5C5C5C5C);
-	}
-
-	SHA1_CTX ShaContext;
-	SHA1Init(&ShaContext);
-	SHA1Update(&ShaContext, Pad1, 64);
-
-	if (cbData != 0) {
-		SHA1Update(&ShaContext, pbData, cbData);
-	}
-
-	if (cbData2 != 0) {
-		SHA1Update(&ShaContext, pbData2, cbData2);
-	}
-
-	BYTE Temp[64 + A_SHA_DIGEST_LEN];
-	SHA1Final(Temp + 64, &ShaContext);
-	RtlCopyMemory(Temp, Pad2, 64);
-
-	SHA1Init(&ShaContext);
-	SHA1Update(&ShaContext, Temp, sizeof(Temp));
-	SHA1Final(HmacData, &ShaContext);
+	CxbxHostHMAC(pbKeyMaterial, cbKeyMaterial, pbData, cbData,
+		pbData2, cbData2, HmacData);
 }
 
 xbox::ulong_xt NTAPI JumpedPKEncPublic

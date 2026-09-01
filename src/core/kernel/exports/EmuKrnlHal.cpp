@@ -58,8 +58,33 @@ HalSystemInterrupt HalSystemInterrupts[MAX_BUS_INTERRUPT_LEVEL + 1];
 uint8_t ResetOrShutdownCommandCode = 0;
 uint32_t ResetOrShutdownDataValue = 0;
 
-// global list of routines executed during a reboot
-xbox::LIST_ENTRY ShutdownRoutineList = { &ShutdownRoutineList , &ShutdownRoutineList }; // see InitializeListHead()
+// Global list of routines executed during a reboot. Xbox list links are 32-bit,
+// so the UWP x64 build must keep the sentinel in guest-addressable memory.
+#if defined(CXBXR_UWP)
+static xbox::PLIST_ENTRY ShutdownRoutineList = xbox::zeroptr;
+#else
+static xbox::LIST_ENTRY ShutdownRoutineListStorage = {
+	&ShutdownRoutineListStorage, &ShutdownRoutineListStorage };
+static xbox::PLIST_ENTRY ShutdownRoutineList = &ShutdownRoutineListStorage;
+#endif
+
+static xbox::PLIST_ENTRY GetShutdownRoutineList()
+{
+#if defined(CXBXR_UWP)
+	if (ShutdownRoutineList == xbox::zeroptr) {
+		const auto address = g_VMManager.AllocateSystemMemory(
+			xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+			sizeof(xbox::LIST_ENTRY), false);
+		if (address == 0) {
+			CxbxrAbort("Unable to allocate guest-addressable shutdown list");
+			return xbox::zeroptr;
+		}
+		ShutdownRoutineList = reinterpret_cast<xbox::PLIST_ENTRY>(address);
+		InitializeListHead(ShutdownRoutineList);
+	}
+#endif
+	return ShutdownRoutineList;
+}
 
 #define TRAY_CLOSED_MEDIA_PRESENT 0x60
 #define TRAY_CLOSED_NO_MEDIA 0x40
@@ -409,8 +434,10 @@ XBSYSAPI EXPORTNUM(47) xbox::void_xt NTAPI xbox::HalRegisterShutdownNotification
 
 	if (Register)
 	{
-		ListEntry = ShutdownRoutineList.Flink;
-		while (ListEntry != &ShutdownRoutineList)
+		auto ListHead = GetShutdownRoutineList();
+		if (ListHead == xbox::zeroptr) return;
+		ListEntry = ListHead->Flink;
+		while (ListEntry != ListHead)
 		{
 			if (ShutdownRegistration->Priority > CONTAINING_RECORD(ListEntry, HAL_SHUTDOWN_REGISTRATION, ListEntry)->Priority)
 			{
@@ -420,15 +447,17 @@ XBSYSAPI EXPORTNUM(47) xbox::void_xt NTAPI xbox::HalRegisterShutdownNotification
 			ListEntry = ListEntry->Flink;
 		}
 
-		if (ListEntry == &ShutdownRoutineList)
+		if (ListEntry == ListHead)
 		{
 			InsertTailList(ListEntry, &ShutdownRegistration->ListEntry);
 		}
 	}
 	else
 	{
-		ListEntry = ShutdownRoutineList.Flink;
-		while (ListEntry != &ShutdownRoutineList)
+		auto ListHead = GetShutdownRoutineList();
+		if (ListHead == xbox::zeroptr) return;
+		ListEntry = ListHead->Flink;
+		while (ListEntry != ListHead)
 		{
 			if (ShutdownRegistration == CONTAINING_RECORD(ListEntry, HAL_SHUTDOWN_REGISTRATION, ListEntry))
 			{
@@ -531,11 +560,13 @@ XBSYSAPI EXPORTNUM(49) xbox::void_xt DECLSPEC_NORETURN NTAPI xbox::HalReturnToFi
 				{
 					OldIrql = KeRaiseIrqlToDpcLevel();
 
-					ListEntry = RemoveHeadList(&ShutdownRoutineList);
+					auto ListHead = GetShutdownRoutineList();
+					if (ListHead == xbox::zeroptr) break;
+					ListEntry = RemoveHeadList(ListHead);
 
 					KfLowerIrql(OldIrql);
 
-					if (ListEntry == &ShutdownRoutineList)
+					if (ListEntry == ListHead)
 						break;
 
 					ShutdownRegistration = CONTAINING_RECORD(ListEntry, HAL_SHUTDOWN_REGISTRATION, ListEntry);

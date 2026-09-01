@@ -117,9 +117,15 @@ bool ReserveMemoryRange(int index, blocks_reserved_t blocks_reserved)
 	// with VEH-based redirect to contiguous memory. This breaks the MapViewOfFileEx
 	// alias between 0x80000000 and 0xF0000000 (which is unnecessary under HLE).
 	if (Start == PHYSICAL_MAP1_BASE) {
+		DWORD allocationType = MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH;
+#if defined(CXBXR_UWP)
+		// VirtualAllocFromApp does not expose MEM_WRITE_WATCH. The UWP renderer
+		// uses its full-upload fallback instead.
+		allocationType = MEM_RESERVE | MEM_COMMIT;
+#endif
 		LPVOID Result = AllocateMemoryAt(
 			(LPVOID)Start, Size,
-			MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+			allocationType,
 			PAGE_EXECUTE_READWRITE);
 #ifdef DEBUG
 		std::printf("     : VirtualAlloc(MEM_WRITE_WATCH); Start = 0x%08X; Result = %p\n", Start, Result);
@@ -361,6 +367,13 @@ bool AttemptReserveAddressRanges(unsigned int* p_reserved_systems, blocks_reserv
 		if (clear_systems) {
 			// Skip address ranges that doesn't match the given flags
 			if (!AddressRangeMatchesFlags(i, clear_systems))
+				continue;
+
+			// A range tagged SYSTEM_ALL is shared by Retail, DevKit and
+			// Chihiro. Do not free it while downgrading the compatible set if
+			// at least one system that remains selected still needs it.
+			const unsigned int remaining_systems = reserved_systems & ~clear_systems;
+			if (AddressRangeMatchesFlags(i, remaining_systems))
 				continue;
 
 			// Release incompatible system's memory range

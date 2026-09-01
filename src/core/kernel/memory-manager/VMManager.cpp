@@ -47,6 +47,49 @@
 constexpr char str_persistent_memory_s[] = "PersistentMemory-s";
 VMManager g_VMManager;
 
+static LPVOID AllocateXboxHostMemory(LPVOID address, SIZE_T size,
+	DWORD allocationType, DWORD protection)
+{
+#if defined(CXBXR_UWP)
+	// Guest instructions are translated by TCG; the backing pages themselves
+	// are data and do not need executable host permission.
+	if (protection == PAGE_EXECUTE_READWRITE) {
+		protection = PAGE_READWRITE;
+	}
+	LPVOID result = VirtualAllocFromApp(address, size, allocationType, protection);
+	if (result == nullptr && allocationType == MEM_COMMIT) {
+		// ReserveAddressRanges owns the low Xbox space as independent 64 KiB
+		// reservations. VirtualAllocFromApp rejects one MEM_COMMIT that crosses
+		// allocation boundaries (ERROR_INVALID_ADDRESS). Commit page by page so
+		// every call stays inside one reservation. If an optional low block was
+		// not reserved, acquire that block on demand.
+		const uintptr_t requested = reinterpret_cast<uintptr_t>(address);
+		const uintptr_t begin = ROUND_DOWN_4K(requested);
+		const uintptr_t end = ROUND_UP_4K(requested + size);
+		for (uintptr_t page = begin; page < end; page += PAGE_SIZE) {
+			LPVOID pageResult = VirtualAllocFromApp(reinterpret_cast<LPVOID>(page),
+				PAGE_SIZE, MEM_COMMIT, protection);
+			if (pageResult == nullptr) {
+				MEMORY_BASIC_INFORMATION memoryInfo{};
+				if (VirtualQuery(reinterpret_cast<LPCVOID>(page), &memoryInfo,
+					sizeof(memoryInfo)) == 0 || memoryInfo.State != MEM_FREE) {
+					return nullptr;
+				}
+				pageResult = VirtualAllocFromApp(reinterpret_cast<LPVOID>(page),
+					PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, protection);
+				if (pageResult == nullptr) {
+					return nullptr;
+				}
+			}
+		}
+		result = address;
+	}
+	return result;
+#else
+	return VirtualAlloc(address, size, allocationType, protection);
+#endif
+}
+
 
 void VMManager::Shutdown()
 {
@@ -98,7 +141,7 @@ void VMManager::Initialize(unsigned int SystemType, int BootFlags, blocks_reserv
 	// Commit all the memory reserved by the loader for the PTs
 	// We are looping here because memory-reservation happens in 64 KiB increments
 	for (int i = 0; i < 64; i++) {
-		LPVOID ret = VirtualAlloc((LPVOID)(PAGE_TABLES_BASE + i * m_AllocationGranularity), m_AllocationGranularity, MEM_COMMIT, PAGE_READWRITE);
+		LPVOID ret = AllocateXboxHostMemory((LPVOID)(PAGE_TABLES_BASE + i * m_AllocationGranularity), m_AllocationGranularity, MEM_COMMIT, PAGE_READWRITE);
 		if (ret != (LPVOID)(PAGE_TABLES_BASE + i * KiB(64))) {
 			CxbxrAbort("VirtualAlloc failed to commit the memory for the page tables. The error was 0x%08X", GetLastError());
 		}
@@ -144,13 +187,29 @@ void VMManager::Initialize(unsigned int SystemType, int BootFlags, blocks_reserv
 		if (CxbxKrnl_Xbe->m_Header.dwInitFlags.bLimit64MB) { m_bAllowNonDebuggerOnTop64MiB = false; }
 	}
 
+#if defined(CXBXR_UWP)
+	// The physical map is backing storage used immediately by WritePfn. Check
+	// the actual AppContainer mapping before touching its fixed guest address.
+	MEMORY_BASIC_INFORMATION physicalMapInfo{};
+	if (VirtualQuery((const void*)PHYSICAL_MAP1_BASE, &physicalMapInfo,
+			sizeof(physicalMapInfo)) == 0 ||
+		physicalMapInfo.State != MEM_COMMIT ||
+		reinterpret_cast<uintptr_t>(physicalMapInfo.BaseAddress) != PHYSICAL_MAP1_BASE ||
+		physicalMapInfo.RegionSize < PHYSICAL_MAP1_SIZE) {
+		CxbxrAbort("UWP physical memory map is unavailable at 0x%08X (state=0x%X, size=0x%zX, error=0x%08X)",
+			PHYSICAL_MAP1_BASE, physicalMapInfo.State,
+			physicalMapInfo.RegionSize, GetLastError());
+		return;
+	}
+#endif
+
 	// Insert all the pages available on the system in the free list
-	xbox::PLIST_ENTRY ListEntry = FreeList.Blink;
+	HostListEntry* ListEntry = FreeList.Blink;
 	PFreeBlock block = new FreeBlock;
 	block->start = 0;
 	block->size = m_HighestPage + 1;
 	block->ListEntry.Flink = block->ListEntry.Blink = nullptr; // Was LIST_ENTRY_INITIALIZE()
-	InsertHeadList(ListEntry, &block->ListEntry);
+	HostInsertHeadList(ListEntry, &block->ListEntry);
 
 	if ((BootFlags & BOOT_QUICK_REBOOT) == 0) {
 		InitializeSystemAllocations();
@@ -1389,7 +1448,7 @@ xbox::ntstatus_xt VMManager::XbAllocateVirtualMemory(VAddr* addr, ULONG ZeroBits
 				// Don't do anything, ConstructVMA will be called below to track the allocation inside the placeholder
 			}
 			else {
-				if ((VAddr)VirtualAlloc((void*)AlignedCapturedBase, AlignedCapturedSize, MEM_RESERVE,
+				if ((VAddr)AllocateXboxHostMemory((void*)AlignedCapturedBase, AlignedCapturedSize, MEM_RESERVE,
 					ConvertXboxToWinPermissions(PatchXboxPermissions(Protect)) & ~(PAGE_WRITECOMBINE | PAGE_NOCACHE)) != AlignedCapturedBase)
 				{
 					// An host allocation is already mapped there, report an error
@@ -1471,10 +1530,15 @@ xbox::ntstatus_xt VMManager::XbAllocateVirtualMemory(VAddr* addr, ULONG ZeroBits
 
 	// Attempt to commit the requested range with VirtualAlloc *before* setting up and reserving the PT
 	// This allows an early-out in a failure scenario (Test Case: Star Wars Battlefront DVD Demo: LA-018 v1.02)
-    // We don't commit the requested range if it's within our placeholder, since that was already allocated earlier
+	// The desktop loader committed its low image placeholder. The UWP DLL host
+	// only reserves it, so it must also commit XBE headers/sections here.
+#if defined(CXBXR_UWP)
+	if (true)
+#else
 	if (AlignedCapturedBase >= XBE_MAX_VA)
+#endif
 	{
-		if (!VirtualAlloc((void*)AlignedCapturedBase, AlignedCapturedSize, MEM_COMMIT,
+		if (!AllocateXboxHostMemory((void*)AlignedCapturedBase, AlignedCapturedSize, MEM_COMMIT,
 			(ConvertXboxToWinPermissions(PatchXboxPermissions(Protect))) & ~(PAGE_WRITECOMBINE | PAGE_NOCACHE)))
 		{
 			EmuLog(LOG_LEVEL::DEBUG, "%s: VirtualAlloc failed to commit the memory! The error was 0x%08X", __func__, GetLastError());
@@ -2099,7 +2163,7 @@ VAddr VMManager::MapHostMemory(VAddr StartingAddr, size_t Size, size_t VmaEnd, D
 {
 	for (; StartingAddr + Size - 1 < VmaEnd; StartingAddr += m_AllocationGranularity)
 	{
-		if ((VAddr)VirtualAlloc((void*)StartingAddr, Size, Permissions, PAGE_EXECUTE_READWRITE) == StartingAddr)
+		if ((VAddr)AllocateXboxHostMemory((void*)StartingAddr, Size, Permissions, PAGE_EXECUTE_READWRITE) == StartingAddr)
 		{
 			return StartingAddr;
 		}

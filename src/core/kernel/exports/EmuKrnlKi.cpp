@@ -87,6 +87,8 @@ the said software).
 #include "EmuKrnl.h" // for the list support functions
 #include "EmuKrnlKi.h"
 #include "EmuKrnlKe.h"
+#include "core\kernel\memory-manager\VMManager.h"
+#include "core\kernel\init\CxbxKrnl.h"
 #include <unordered_map>
 
 #define MAX_TIMER_DPCS          16
@@ -96,9 +98,20 @@ the said software).
 #define ASSERT_TIMER_LOCKED assert(KiTimerMtx.Acquired > 0)
 #define ASSERT_WAIT_LIST_LOCKED assert(KiWaitListMtx.Acquired > 0)
 
+#if defined(CXBXR_UWP)
+xbox::PKPROCESS KiUniqueProcessPointer = xbox::zeroptr;
+xbox::PLIST_ENTRY KiWaitInListHeadPointer = xbox::zeroptr;
+xbox::KTIMER_TABLE_ENTRY* KiTimerTableListHeadPointer = nullptr;
+#else
 xbox::KPROCESS KiUniqueProcess;
+#endif
 const xbox::ulong_xt CLOCK_TIME_INCREMENT = 0x2710;
-xbox::KDPC KiTimerExpireDpc;
+#if defined(CXBXR_UWP)
+static xbox::PKDPC KiTimerExpireDpc = xbox::zeroptr;
+#else
+static xbox::KDPC KiTimerExpireDpcStorage;
+static xbox::PKDPC KiTimerExpireDpc = &KiTimerExpireDpcStorage;
+#endif
 xbox::KI_TIMER_LOCK KiTimerMtx;
 xbox::KI_WAIT_LIST_LOCK KiWaitListMtx;
 
@@ -139,8 +152,10 @@ void CxbxSignalThreadWakeEvent(xbox::PKTHREAD Thread)
 		SetEvent(hEvent);
 	}
 }
+#if !defined(CXBXR_UWP)
 xbox::KTIMER_TABLE_ENTRY KiTimerTableListHead[TIMER_TABLE_SIZE];
 xbox::LIST_ENTRY KiWaitInListHead;
+#endif
 std::mutex xbox::KiApcListMtx;
 
 
@@ -165,6 +180,39 @@ static void KiFlushDpcBuffer(
 
 xbox::void_xt xbox::KiInitSystem()
 {
+#if defined(CXBXR_UWP)
+	const auto processAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::KPROCESS), false);
+	const auto waitListAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::LIST_ENTRY), false);
+	const auto timerTableAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+		sizeof(xbox::KTIMER_TABLE_ENTRY) * TIMER_TABLE_SIZE, false);
+	if (processAddress == 0 || waitListAddress == 0 || timerTableAddress == 0) {
+		CxbxrAbort("KiInitSystem: unable to allocate guest-addressable kernel lists");
+		return;
+	}
+	KiUniqueProcessPointer = reinterpret_cast<xbox::PKPROCESS>(processAddress);
+	KiWaitInListHeadPointer = reinterpret_cast<xbox::PLIST_ENTRY>(waitListAddress);
+	KiTimerTableListHeadPointer =
+		reinterpret_cast<xbox::KTIMER_TABLE_ENTRY*>(timerTableAddress);
+	std::memset(KiUniqueProcessPointer, 0, sizeof(xbox::KPROCESS));
+	std::memset(KiTimerTableListHeadPointer, 0,
+		sizeof(xbox::KTIMER_TABLE_ENTRY) * TIMER_TABLE_SIZE);
+
+	const auto idexAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+		sizeof(xbox::IDE_CHANNEL_OBJECT), false);
+	if (idexAddress == 0) {
+		CxbxrAbort("KiInitSystem: unable to allocate guest-addressable IDE channel");
+		return;
+	}
+	auto idexChannelObject = reinterpret_cast<xbox::PIDE_CHANNEL_OBJECT>(idexAddress);
+	std::memset(idexChannelObject, 0, sizeof(xbox::IDE_CHANNEL_OBJECT));
+	CxbxKrnl_KernelThunkTable[357] = idexAddress;
+#else
+	auto idexChannelObject = &IdexChannelObject;
+#endif
 	KiUniqueProcess.StackCount = 0;
 	KiUniqueProcess.ThreadQuantum = X_THREAD_QUANTUM;
 	InitializeListHead(&KiUniqueProcess.ThreadListHead);
@@ -172,14 +220,23 @@ xbox::void_xt xbox::KiInitSystem()
 	InitializeListHead(&KiWaitInListHead);
 
 	KiTimerMtx.Acquired = 0;
-	KeInitializeDpc(&KiTimerExpireDpc, KiTimerExpiration, NULL);
+#if defined(CXBXR_UWP)
+	const auto timerDpcAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::KDPC), false);
+	if (timerDpcAddress == 0) {
+		CxbxrAbort("KiInitSystem: unable to allocate guest-addressable timer DPC");
+		return;
+	}
+	KiTimerExpireDpc = reinterpret_cast<xbox::PKDPC>(timerDpcAddress);
+#endif
+	KeInitializeDpc(KiTimerExpireDpc, KiTimerExpiration, NULL);
 	for (unsigned i = 0; i < TIMER_TABLE_SIZE; i++) {
 		InitializeListHead(&KiTimerTableListHead[i].Entry);
 		KiTimerTableListHead[i].Time.u.HighPart = 0xFFFFFFFF;
 		KiTimerTableListHead[i].Time.u.LowPart = 0;
 	}
 
-	InitializeListHead(&IdexChannelObject.DeviceQueue.DeviceListHead);
+	InitializeListHead(&idexChannelObject->DeviceQueue.DeviceListHead);
 }
 
 xbox::void_xt xbox::KiTimerLock()
@@ -262,7 +319,7 @@ xbox::void_xt xbox::KiClockIsr(ulonglong_xt TotalUs)
 			Hand = i & (TIMER_TABLE_SIZE - 1);
 			if (KiTimerTableListHead[Hand].Entry.Flink != &KiTimerTableListHead[Hand].Entry &&
 				(ULONGLONG)InterruptTime.QuadPart >= KiTimerTableListHead[Hand].Time.QuadPart) {
-				KeInsertQueueDpc(&KiTimerExpireDpc, (PVOID)OldKeTickCount, (PVOID)EndKeTickCount);
+				KeInsertQueueDpc(KiTimerExpireDpc, (PVOID)OldKeTickCount, (PVOID)EndKeTickCount);
 				break;
 			}
 		}
@@ -335,7 +392,6 @@ xbox::void_xt FASTCALL xbox::KiCompleteTimer
 	IN xbox::ulong_xt Hand
 )
 {
-	LIST_ENTRY ListHead;
 	BOOLEAN RequestInterrupt = FALSE;
 
 	ASSERT_TIMER_LOCKED;
@@ -343,16 +399,10 @@ xbox::void_xt FASTCALL xbox::KiCompleteTimer
 	/* Remove it from the timer list */
 	KiRemoveEntryTimer(Timer, Hand);
 
-	/* Link the timer list to our stack */
-	ListHead.Flink = &Timer->TimerListEntry;
-	ListHead.Blink = &Timer->TimerListEntry;
-	Timer->TimerListEntry.Flink = &ListHead;
-	Timer->TimerListEntry.Blink = &ListHead;
-
-	/* Signal the timer if it's still on our list */
-	if (!IsListEmpty(&ListHead)) {
-		RequestInterrupt = KiSignalTimer(Timer);
-	}
+	/* The timer was the entry selected for completion. Do not construct a
+	 * temporary Xbox LIST_ENTRY on the native x64 stack: its 32-bit links
+	 * cannot represent the stack address. */
+	RequestInterrupt = KiSignalTimer(Timer);
 
 	/* Request a DPC if needed */
 	if (RequestInterrupt) {

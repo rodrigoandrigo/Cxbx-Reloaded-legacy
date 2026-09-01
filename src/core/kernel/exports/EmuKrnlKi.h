@@ -278,10 +278,19 @@ void CxbxUnregisterThreadWakeEvent(xbox::PKTHREAD Thread);
 void* CxbxGetThreadWakeEvent(xbox::PKTHREAD Thread);
 void CxbxSignalThreadWakeEvent(xbox::PKTHREAD Thread);
 
+#if defined(CXBXR_UWP)
+extern xbox::PKPROCESS KiUniqueProcessPointer;
+extern xbox::PLIST_ENTRY KiWaitInListHeadPointer;
+extern xbox::KTIMER_TABLE_ENTRY* KiTimerTableListHeadPointer;
+#define KiUniqueProcess (*KiUniqueProcessPointer)
+#define KiWaitInListHead (*KiWaitInListHeadPointer)
+#define KiTimerTableListHead (KiTimerTableListHeadPointer)
+#else
 extern xbox::KPROCESS KiUniqueProcess;
-extern const xbox::ulong_xt CLOCK_TIME_INCREMENT;
 extern xbox::LIST_ENTRY KiWaitInListHead;
 extern xbox::KTIMER_TABLE_ENTRY KiTimerTableListHead[TIMER_TABLE_SIZE];
+#endif
+extern const xbox::ulong_xt CLOCK_TIME_INCREMENT;
 extern xbox::KI_TIMER_LOCK KiTimerMtx;
 
 #define KiLockDispatcherDatabase(OldIrql)      \

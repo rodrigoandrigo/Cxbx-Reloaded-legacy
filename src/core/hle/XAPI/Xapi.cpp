@@ -472,7 +472,7 @@ xbox::void_xt WINAPI xbox::EMUPATCH(XInitDevices)
 {
 	LOG_FUNC_BEGIN
 		LOG_FUNC_ARG(dwPreallocTypeCount)
-		LOG_FUNC_ARG((DWORD)PreallocTypes)
+		LOG_FUNC_ARG(PreallocTypes)
 		LOG_FUNC_END;
 
 	// TODO: May need to apply this delay update to LLE USB if modern hardware initialization is faster than og xbox hardware.

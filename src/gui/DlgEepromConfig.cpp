@@ -35,6 +35,7 @@
 #include "resource/ResCxbx.h"
 #include "common/FilePaths.hpp"
 #include "common/Logging.h"
+#include "common/crypto/EmuSha.h"
 #include <Commctrl.h>
 
 
@@ -204,7 +205,7 @@ void WriteEepromInMemory(HWND hDlg)
 		EepromFile.read(EepromKey, 16);
 		EepromFile.close();
 	}
-	xbox::XcHMAC(EepromKey, 16, pEEPROM_GUI->EncryptedSettings.Confounder, 8, pEEPROM_GUI->EncryptedSettings.HDKey, 20,
+	CxbxHostHMAC(EepromKey, 16, pEEPROM_GUI->EncryptedSettings.Confounder, 8, pEEPROM_GUI->EncryptedSettings.HDKey, 20,
 		pEEPROM_GUI->EncryptedSettings.Checksum);
 	gen_section_CRCs(pEEPROM_GUI);
 }

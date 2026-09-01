@@ -166,19 +166,20 @@ void DirectXPage::UpdateButtons()
 
 IAsyncAction^ DirectXPage::SuspendAsync()
 {
-	if (!m_main) {
-		return create_async([]() {});
-	}
-	return create_async([this]() {
-		return m_main->StopAsync().then([resources = m_deviceResources]() {
-			resources->Trim();
-		});
+	// UWP can suspend/deactivate the app around pickers, dialogs and ordinary
+	// lifecycle transitions. Suspending the process already freezes its
+	// threads; destroying the embedded core here turned those transitions into
+	// an unsolicited user-visible Stop. Preserve the session and only release
+	// discardable D3D allocations. Explicit Stop and host destruction still
+	// perform the full RequestStop/Destroy sequence.
+	return create_async([resources = m_deviceResources]() {
+		resources->Trim();
 	});
 }
 
 void DirectXPage::SaveInternalState(IPropertySet^)
 {
-	(void)SuspendAsync();
+	// State persistence must not terminate an active emulation session.
 }
 
 void DirectXPage::LoadInternalState(IPropertySet^)

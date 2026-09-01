@@ -315,7 +315,7 @@ inline Sanesanitized_wchar_pointer _log_sanitize(const wchar_t* value, int max =
 //
 
 constexpr const int str_length(const char* str) {
-	return str_end(str) - str;
+	return static_cast<int>(str_end(str) - str);
 }
 
 constexpr const char* str_skip_prefix(const char* str, const char *prefix) {
@@ -400,7 +400,7 @@ extern thread_local std::string _logThreadPrefix;
 // LOG_FUNC_ARG_OUT prevents expansion of types, by only rendering as a pointer
 #define LOG_FUNC_ARG_OUT(arg) \
 		_had_arg = true; \
-		msg << LOG_ARG_OUT_START << #arg << " : " << hex4((uint32_t)arg);
+		msg << LOG_ARG_OUT_START << #arg << " : " << static_cast<const void*>(arg);
 
 // LOG_FUNC_END closes off function and optional argument logging
 #define LOG_FUNC_END \
@@ -630,7 +630,7 @@ hexstring32(std::basic_ostream<_CharT, _Traits>&os)
 #define LOGRENDER(Type)                                         \
 LOGRENDER_HEADER_BY_PTR(Type)                                   \
 {                                                               \
-	os << hexstring32 << reinterpret_cast<uint32_t>(value);     \
+	os << hexstring32 << static_cast<uint32_t>(reinterpret_cast<uintptr_t>(value)); \
 	if (value)                                                  \
 		os << " -> "#Type"* {" << *value << "}";                \
                                                                 \

@@ -37,13 +37,23 @@ namespace xbox
 	// __ptr32 keeps their storage/layout correct while still allowing direct
 	// access to Cxbx's low 4 GiB guest address space.
 	#if defined(_MSC_VER) && defined(_WIN64)
-	#define XBOX_PTR32 __ptr32
+	// Guest addresses occupy the full 32-bit Xbox address space (including
+	// 0x80000000-0xFFFFFFFF).  __ptr32 alone may sign-extend such pointers when
+	// MSVC promotes them to a native x64 pointer, producing addresses such as
+	// 0xFFFFFFFFD0000000.  __uptr makes that promotion zero-extend instead.
+	#define XBOX_PTR32 __ptr32 __uptr
 	#else
 	#define XBOX_PTR32
 	#endif
 
 	template<typename T>
 	using ptr_xt = T* XBOX_PTR32;
+
+	#if defined(CXBXR_UWP) && defined(_WIN64)
+	static_assert(sizeof(void*) == 8, "The UWP core is a native x64 module");
+	static_assert(sizeof(ptr_xt<void>) == 4,
+		"Xbox ABI pointers must remain 32-bit inside guest structures");
+	#endif
 
 	// ******************************************************************
 	// * Calling conventions

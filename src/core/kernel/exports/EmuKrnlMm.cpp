@@ -136,7 +136,9 @@ XBSYSAPI EXPORTNUM(168) xbox::PVOID NTAPI xbox::MmClaimGpuInstanceMemory
 		LOG_FUNC_ARG_OUT(NumberOfPaddingBytes)
 	LOG_FUNC_END;
 
-	PVOID Result = (PVOID)g_VMManager.ClaimGpuMemory(NumberOfBytes, (size_t*)NumberOfPaddingBytes);
+	size_t nativePaddingBytes = 0;
+	PVOID Result = (PVOID)g_VMManager.ClaimGpuMemory(NumberOfBytes, &nativePaddingBytes);
+	*NumberOfPaddingBytes = static_cast<xbox::size_xt>(nativePaddingBytes);
 
 	RETURN(Result);
 }

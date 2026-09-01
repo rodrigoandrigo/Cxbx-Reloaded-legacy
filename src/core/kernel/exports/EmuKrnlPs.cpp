@@ -44,6 +44,7 @@
 #include "core\kernel\support\Emu.h" // For EmuLog(LOG_LEVEL::WARNING, )
 #include "core\kernel\support\EmuFS.h" // For EmuGenerateFS
 #include "core\kernel\support\NativeHandle.h"
+#include "core\kernel\memory-manager\VMManager.h"
 #include "devices\x86\EmuX86.h"
 
 // prevent name collisions
@@ -234,7 +235,12 @@ static void PspRemoveThreadFromProcess(xbox::PETHREAD eThread)
 }
 
 // Source: ReactOS
-xbox::LIST_ENTRY PspReaperListHead;
+#if defined(CXBXR_UWP)
+static xbox::PLIST_ENTRY PspReaperListHead = xbox::zeroptr;
+#else
+static xbox::LIST_ENTRY PspReaperListHeadStorage;
+static xbox::PLIST_ENTRY PspReaperListHead = &PspReaperListHeadStorage;
+#endif
 static std::mutex g_ReaperListMtx;
 xbox::void_xt NTAPI PspReaperRoutine(
 	IN xbox::PKDPC Dpc,
@@ -255,10 +261,10 @@ xbox::void_xt NTAPI PspReaperRoutine(
 	std::unique_lock lck(g_ReaperListMtx);
 
 	/* Write magic value and return the next entry to process */
-	NextEntry = PspReaperListHead.Flink;
+	NextEntry = PspReaperListHead->Flink;
 
 	/* Start loop */
-	while (NextEntry != &PspReaperListHead) {
+	while (NextEntry != PspReaperListHead) {
 		/* Get the first Thread Entry */
 		Thread = reinterpret_cast<PETHREAD>(
 			reinterpret_cast<char*>(NextEntry) - offsetof(ETHREAD, ReaperLink));
@@ -318,15 +324,36 @@ xbox::ntstatus_xt NTAPI CxbxrCreateThread
 	);
 }
 
-static xbox::KDPC PsReaperDpc;
+#if defined(CXBXR_UWP)
+static xbox::PKDPC PsReaperDpc = xbox::zeroptr;
+#else
+static xbox::KDPC PsReaperDpcStorage;
+static xbox::PKDPC PsReaperDpc = &PsReaperDpcStorage;
+#endif
 xbox::void_xt xbox::PsInitSystem()
 {
 #ifdef ENABLE_KTHREAD_SWITCHING
 	assert(0); // NOTE: Verify all defined ENABLE_KTHREAD_SWITCHING check are implemented
 #endif
 	/* Setup the reaper */
-	InitializeListHead(&PspReaperListHead);
-	KeInitializeDpc(&PsReaperDpc, PspReaperRoutine, zeroptr);
+#if defined(CXBXR_UWP)
+	const auto reaperListAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::LIST_ENTRY), false);
+	if (reaperListAddress == 0) {
+		CxbxrAbort("PsInitSystem: unable to allocate guest-addressable reaper list");
+		return;
+	}
+	PspReaperListHead = reinterpret_cast<xbox::PLIST_ENTRY>(reaperListAddress);
+	const auto reaperDpcAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::KDPC), false);
+	if (reaperDpcAddress == 0) {
+		CxbxrAbort("PsInitSystem: unable to allocate guest-addressable reaper DPC");
+		return;
+	}
+	PsReaperDpc = reinterpret_cast<xbox::PKDPC>(reaperDpcAddress);
+#endif
+	InitializeListHead(PspReaperListHead);
+	KeInitializeDpc(PsReaperDpc, PspReaperRoutine, zeroptr);
 }
 
 // ******************************************************************
@@ -626,14 +653,14 @@ XBSYSAPI EXPORTNUM(258) xbox::void_xt NTAPI xbox::PsTerminateSystemThread
 		KiUniqueProcess.StackCount--;
 		{
 			std::unique_lock lck(g_ReaperListMtx);
-			InsertTailList(&PspReaperListHead, &((PETHREAD)eThread)->ReaperLink);
+			InsertTailList(PspReaperListHead, &((PETHREAD)eThread)->ReaperLink);
 		}
 		KfLowerIrql(OldIrql);
 	}
 
 	// PspReaperRoutine technically free'd the memory allocation from MmCreateKernelStack function.
 	// Therefore is run from another thread.
-	KeInsertQueueDpc(&PsReaperDpc, NULL, NULL);
+		KeInsertQueueDpc(PsReaperDpc, NULL, NULL);
 
 	EmuKeFreePcr();
 

@@ -84,10 +84,15 @@ XBSYSAPI EXPORTNUM(327) xbox::ntstatus_xt NTAPI xbox::XeLoadSection
 			VAddr BaseAddress = (VAddr)Section->VirtualAddress;
 			size_t SectionSize = (VAddr)Section->VirtualSize;
 
-			ret = g_VMManager.XbAllocateVirtualMemory(&BaseAddress, 0, &SectionSize, XBOX_MEM_COMMIT, XBOX_PAGE_EXECUTE_READWRITE);
-			if (ret != X_STATUS_SUCCESS) {
-				RETURN(ret);
-			}
+				ret = g_VMManager.XbAllocateVirtualMemory(&BaseAddress, 0, &SectionSize, XBOX_MEM_COMMIT, XBOX_PAGE_EXECUTE_READWRITE);
+				if (ret != X_STATUS_SUCCESS) {
+					EmuLog(LOG_LEVEL::ERROR2,
+						"XeLoadSection: commit failed (status=0x%08X, base=0x%08X, size=0x%08X)",
+						static_cast<unsigned>(ret),
+						static_cast<unsigned>(reinterpret_cast<uintptr_t>(Section->VirtualAddress)),
+						static_cast<unsigned>(Section->VirtualSize));
+					RETURN(ret);
+				}
 
 			// Clear the memory the section requires
 			memset(Section->VirtualAddress, 0, Section->VirtualSize);
@@ -103,6 +108,12 @@ XBSYSAPI EXPORTNUM(327) xbox::ntstatus_xt NTAPI xbox::XeLoadSection
 		Section->SectionReferenceCount++;
 	}
 	else {
+		EmuLog(LOG_LEVEL::ERROR2,
+			"XeLoadSection: descriptor not found (file=0x%08X/0x%08X, virtual=0x%08X/0x%08X)",
+			static_cast<unsigned>(Section->FileAddress),
+			static_cast<unsigned>(Section->FileSize),
+			static_cast<unsigned>(reinterpret_cast<uintptr_t>(Section->VirtualAddress)),
+			static_cast<unsigned>(Section->VirtualSize));
 		ret = X_STATUS_INVALID_HANDLE;
 	}
 	

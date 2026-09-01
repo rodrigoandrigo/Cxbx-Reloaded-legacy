@@ -119,16 +119,16 @@ void SetupPerTitleKeys()
 	UCHAR Digest[20] = {};
 
 	// Set the LAN Key
-	xbox::XcHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzLanKey, xbox::XBOX_KEY_LENGTH, NULL, 0, Digest);
+	CxbxHostHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzLanKey, xbox::XBOX_KEY_LENGTH, nullptr, 0, Digest);
 	memcpy(xbox::XboxLANKey, Digest, xbox::XBOX_KEY_LENGTH);
 
 	// Signature Key
-	xbox::XcHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzSignatureKey, xbox::XBOX_KEY_LENGTH, NULL, 0, Digest);
+	CxbxHostHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzSignatureKey, xbox::XBOX_KEY_LENGTH, nullptr, 0, Digest);
 	memcpy(xbox::XboxSignatureKey, Digest, xbox::XBOX_KEY_LENGTH);
 
 	// Alternate Signature Keys
 	for (int i = 0; i < xbox::ALTERNATE_SIGNATURE_COUNT; i++) {
-		xbox::XcHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzTitleAlternateSignatureKey[i], xbox::XBOX_KEY_LENGTH, NULL, 0, Digest);
+		CxbxHostHMAC(xbox::XboxCertificateKey, xbox::XBOX_KEY_LENGTH, g_pCertificate->bzTitleAlternateSignatureKey[i], xbox::XBOX_KEY_LENGTH, nullptr, 0, Digest);
 		memcpy(xbox::XboxAlternateSignatureKeys[i], Digest, xbox::XBOX_KEY_LENGTH);
 	}
 
@@ -167,9 +167,15 @@ IMAGE_DATA_DIRECTORY Xbe_TLS = { };
 // header fields that RestoreExeImageHeader needs to restore.
 void StoreXbeImageHeader()
 {
+#if defined(CXBXR_UWP)
+	// The embedded core is a DLL and owns no PE image at the Xbox base address.
+	// The bytes at 0x00010000 must remain the title's XBE header for TCG.
+	return;
+#else
 	Xbe_magic = ExeDosHeader->e_magic; // Normally 0x4258 = 'XB'; (...'EH')
 	Xbe_lfanew = ExeDosHeader->e_lfanew;
 	Xbe_TLS = ExeOptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+#endif
 }
 
 // Restore memory to the exact contents as loaded from the current XBE.
@@ -177,18 +183,26 @@ void StoreXbeImageHeader()
 // because those can fail. Hence, RestoreExeImageHeader quickly again!
 void RestoreXbeImageHeader()
 {
+#if defined(CXBXR_UWP)
+	return;
+#else
 	ExeDosHeader->e_magic = Xbe_magic; // Sets XbeHeader.dwMagic
 	ExeDosHeader->e_lfanew = Xbe_lfanew; // Sets part of XbeHeader.pbDigitalSignature
 	ExeOptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS] = Xbe_TLS;
+#endif
 }
 
 // Restore memory to the exact contents loaded from the running EXE.
 // This is required to keep thread-switching and Windows API's working.
 void RestoreExeImageHeader()
 {
+#if defined(CXBXR_UWP)
+	return;
+#else
 	ExeDosHeader->e_magic = NewDosHeader->e_magic; // = 0x5A4D = 'MZ'; Overwrites XbeHeader.dwMagic
 	ExeDosHeader->e_lfanew = NewDosHeader->e_lfanew; // Overwrites part of XbeHeader.pbDigitalSignature
 	ExeOptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS] = NewOptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+#endif
 }
 
 // Returns the Win32 error in string format. Returns an empty string if there is no error.
@@ -352,12 +366,20 @@ void MapThunkTable(uint32_t* kt, const uintptr_t* pThunkTable)
 		else {
 #if defined(CXBXR_UWP)
 			if (IsKernelThunkTable && CxbxKrnl_KernelThunkIsData(t)) {
-				// Preserve the offset inside the native page. Each vCPU maps the
-				// corresponding host page at this ordinal-specific guest page.
-				kt_tbl[i] = QEMU_CXBX_KERNEL_DATA_BASE +
-					(t * QEMU_CXBX_KERNEL_DATA_STRIDE) +
-					(static_cast<uint32_t>(pThunkTable[t]) &
-					 (QEMU_CXBX_KERNEL_DATA_STRIDE - 1));
+				if (pThunkTable[t] <= UINT32_MAX) {
+					// Some x64/UWP data exports are explicitly backed by memory in
+					// the 32-bit guest address space. Preserve that directly so a
+					// pointer passed back to a kernel API remains host-dereferenceable.
+					kt_tbl[i] = static_cast<uint32_t>(pThunkTable[t]);
+				}
+				else {
+					// Preserve the offset inside the native page. Each vCPU maps the
+					// corresponding host page at this ordinal-specific guest page.
+					kt_tbl[i] = QEMU_CXBX_KERNEL_DATA_BASE +
+						(t * QEMU_CXBX_KERNEL_DATA_STRIDE) +
+						(static_cast<uint32_t>(pThunkTable[t]) &
+						 (QEMU_CXBX_KERNEL_DATA_STRIDE - 1));
+				}
 			}
 			else {
 				const uint32_t base = IsKernelThunkTable ?
@@ -498,8 +520,9 @@ static void CxbxrKrnlSyncGUI()
 	}
 }
 
-static void CxbxrKrnlSetupMemorySystem(int BootFlags, unsigned emulate_system, unsigned reserved_systems, blocks_reserved_t blocks_reserved)
+static bool CxbxrKrnlSetupMemorySystem(int BootFlags, unsigned emulate_system, unsigned reserved_systems, blocks_reserved_t blocks_reserved)
 {
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: initializing Xbox memory manager");
 	// Release unnecessary memory ranges to allow console/host to use those memory ranges.
 	FreeAddressRanges(emulate_system, reserved_systems, blocks_reserved);
 	// Initialize the memory manager
@@ -508,22 +531,59 @@ static void CxbxrKrnlSetupMemorySystem(int BootFlags, unsigned emulate_system, u
 	// Commit the memory used by the xbe header
 	size_t HeaderSize = CxbxKrnl_Xbe->m_Header.dwSizeofHeaders;
 	VAddr XbeBase = XBE_IMAGE_BASE;
-	g_VMManager.XbAllocateVirtualMemory(&XbeBase, 0, &HeaderSize, XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+	const NTSTATUS allocationStatus = g_VMManager.XbAllocateVirtualMemory(
+		&XbeBase, 0, &HeaderSize, XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
+	if (allocationStatus != X_STATUS_SUCCESS || XbeBase != CxbxKrnl_Xbe->m_Header.dwBaseAddr) {
+		EmuLogInit(LOG_LEVEL::ERROR2,
+			"Bootstrap: XBE header commit failed (status=0x%08X, requested=0x%08X, returned=0x%08X, size=0x%zX)",
+			static_cast<unsigned>(allocationStatus),
+			static_cast<unsigned>(CxbxKrnl_Xbe->m_Header.dwBaseAddr),
+			static_cast<unsigned>(XbeBase), HeaderSize);
+		return false;
+	}
+
+	// m_ExSize is the page-rounded loader buffer size, not the logical amount
+	// of header data described by the XBE.  The guest allocation is rounded by
+	// XbAllocateVirtualMemory; copying/validating must use dwSizeofHeaders.
+	const size_t headerCopySize = CxbxKrnl_Xbe->m_Header.dwSizeofHeaders;
+	if (headerCopySize < sizeof(Xbe::Header) ||
+		CxbxKrnl_Xbe->m_Header.dwSizeofImage < CxbxKrnl_Xbe->m_Header.dwSizeofHeaders) {
+		EmuLogInit(LOG_LEVEL::ERROR2,
+			"Bootstrap: invalid XBE header sizes (headers=0x%X, image=0x%X, copy=0x%zX)",
+			CxbxKrnl_Xbe->m_Header.dwSizeofHeaders,
+			CxbxKrnl_Xbe->m_Header.dwSizeofImage, headerCopySize);
+		return false;
+	}
 
 	// Copy over loaded Xbe Headers to specified base address
 	memcpy((void*)CxbxKrnl_Xbe->m_Header.dwBaseAddr, &CxbxKrnl_Xbe->m_Header, sizeof(Xbe::Header));
-	memcpy((void*)(CxbxKrnl_Xbe->m_Header.dwBaseAddr + sizeof(Xbe::Header)), CxbxKrnl_Xbe->m_HeaderEx, CxbxKrnl_Xbe->m_ExSize);
+	const size_t headerExtraSize = headerCopySize - sizeof(Xbe::Header);
+	memcpy((void*)(CxbxKrnl_Xbe->m_Header.dwBaseAddr + sizeof(Xbe::Header)),
+		CxbxKrnl_Xbe->m_HeaderEx, headerExtraSize);
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: XBE header committed at 0x%08X", CxbxKrnl_Xbe->m_Header.dwBaseAddr);
 
 	// Load all sections marked as preload using the in-memory copy of the xbe header
 	xbox::PXBEIMAGE_SECTION sectionHeaders = (xbox::PXBEIMAGE_SECTION)CxbxKrnl_Xbe->m_Header.dwSectionHeadersAddr;
+	bool preloadFailed = false;
 	for (uint32_t i = 0; i < CxbxKrnl_Xbe->m_Header.dwSections; i++) {
 		if ((sectionHeaders[i].Flags & XBEIMAGE_SECTION_PRELOAD) != 0) {
 			NTSTATUS result = xbox::XeLoadSection(&sectionHeaders[i]);
 			if (FAILED(result)) {
-				EmuLogInit(LOG_LEVEL::WARNING, "Failed to preload XBE section: %s", CxbxKrnl_Xbe->m_szSectionName[i]);
+				EmuLogInit(LOG_LEVEL::ERROR2,
+					"Failed to preload XBE section %s (status=0x%08X, base=0x%08X, size=0x%08X, win32=%lu)",
+					CxbxKrnl_Xbe->m_szSectionName[i], static_cast<unsigned>(result),
+					static_cast<unsigned>(reinterpret_cast<uintptr_t>(sectionHeaders[i].VirtualAddress)),
+					static_cast<unsigned>(sectionHeaders[i].VirtualSize), GetLastError());
+				preloadFailed = true;
 			}
 		}
 	}
+	if (preloadFailed) {
+		EmuLogInit(LOG_LEVEL::ERROR2,
+			"Bootstrap: one or more required XBE sections could not be loaded");
+		return false;
+	}
+	return true;
 }
 
 static bool CxbxrKrnlXbeSystemSelector(int BootFlags,
@@ -727,8 +787,7 @@ static bool CxbxrKrnlXbeSystemSelector(int BootFlags,
 		CxbxKrnl_Xbe->m_Header.dwInitFlags.bDontSetupHarddisk = true;
 	}
 
-	CxbxrKrnlSetupMemorySystem(BootFlags, emulate_system, reserved_systems, blocks_reserved);
-	return true;
+	return CxbxrKrnlSetupMemorySystem(BootFlags, emulate_system, reserved_systems, blocks_reserved);
 }
 
 // HACK: Attempt to patch out XBE header reads
@@ -777,6 +836,13 @@ static void CxbxrKrnlGetRelativePath(std::filesystem::path& get_relative_path) {
 
 static bool CxbxrKrnlPrepareXbeMap()
 {
+#if defined(CXBXR_UWP)
+	// The desktop loader placed its PE image at XBE_IMAGE_BASE and required the
+	// header swap below. In the DLL/TCG architecture the VM manager owns that
+	// range and commits/copies the real XBE header later; touching a fictitious
+	// PE header here would corrupt or fault on reserved AppContainer pages.
+	return !CxbxEmbedRuntimeStopRequested();
+#else
 
 	// Our executable DOS image header must be loaded at 0x00010000
 	// Assert(ExeDosHeader == XBE_IMAGE_BASE);
@@ -846,6 +912,7 @@ static bool CxbxrKrnlPrepareXbeMap()
 	RestoreExeImageHeader();
 
 	return true;
+#endif
 }
 
 /*! initialize emulation */
@@ -1005,14 +1072,23 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	if (BootFlags == BOOT_NONE) {
 		log_generate_active_filter_output(CXBXR_MODULE::INIT);
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: log configuration ready");
+	if (CxbxEmbedRuntimeStopRequested()) {
+		return;
+	}
 
 	// Now we got the arguments, start by initializing the Xbox memory map :
 	if (!CxbxrKrnlPrepareXbeMap()) {
 		return; // TODO : Halt(0);
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: address map ready");
+	if (CxbxEmbedRuntimeStopRequested()) {
+		return;
+	}
 
 	// Load Xbox Keys from the Cxbx-Reloaded AppData directory
 	LoadXboxKeys();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: Xbox keys processed");
 
 	EEPROM = CxbxRestoreEEPROM(szFilePath_EEPROM_bin);
 	if (EEPROM == nullptr)
@@ -1020,6 +1096,7 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 		PopupFatal(nullptr, "Couldn't init EEPROM!");
 		return; // TODO : Halt(0); 
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: EEPROM ready");
 
 	// TODO : Instead of loading an Xbe here, initialize the kernel so that it will launch the Xbe on itself.
 	// using XeLoadImage from LaunchDataPage->Header.szLaunchPath
@@ -1029,6 +1106,7 @@ void CxbxKrnlEmulate(unsigned int reserved_systems, blocks_reserved_t blocks_res
 	if (!CxbxrKrnlXbeSystemSelector(BootFlags, reserved_systems, blocks_reserved, hardwareModel)) {
 		return;
 	}
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: XBE loaded and memory initialized");
 
 	// We need to remember a few XbeHeader fields, so we can switch between a valid ExeHeader and XbeHeader :
 	StoreXbeImageHeader();
@@ -1142,10 +1220,24 @@ static void CxbxrKrnlInitHacks()
 	CxbxKrnl_TLSData = pTLSData;
 	CxbxKrnl_XbeHeader = pXbeHeader;
 
-	// A patch to dwCertificateAddr is a requirement due to Windows TLS is overwriting dwGameRegion data address.
-	// By using unalternated certificate data, it should no longer cause any problem with titles running and Cxbx's log as well.
-	CxbxKrnl_XbeHeader->dwCertificateAddr = (uint32_t)&CxbxKrnl_Xbe->m_Certificate;
+	// Keep the certificate address visible to both the native x64 core and the
+	// emulated x86 title. Publishing the address of the native Xbe object would
+	// truncate a 64-bit pointer in dwCertificateAddr.
+#if defined(CXBXR_UWP)
+	const auto certificateAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(Xbe::Certificate), false);
+	if (certificateAddress == 0) {
+		CxbxrAbort("Unable to allocate guest-addressable XBE certificate");
+	}
+	g_pCertificate = reinterpret_cast<Xbe::Certificate*>(
+		static_cast<uintptr_t>(certificateAddress));
+	std::memcpy(g_pCertificate, &CxbxKrnl_Xbe->m_Certificate, sizeof(Xbe::Certificate));
+	CxbxKrnl_XbeHeader->dwCertificateAddr = certificateAddress;
+#else
+	CxbxKrnl_XbeHeader->dwCertificateAddr =
+		static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&CxbxKrnl_Xbe->m_Certificate));
 	g_pCertificate = &CxbxKrnl_Xbe->m_Certificate;
+#endif
 
 	// Initialize timer subsystem
 	timer_init();

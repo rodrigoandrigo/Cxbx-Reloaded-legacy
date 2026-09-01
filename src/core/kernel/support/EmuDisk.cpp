@@ -219,7 +219,7 @@ static xbox::OBJECT_TYPE DiskDirectoryObjectType = {
 	nullptr,
 	nullptr,
 	&xbox::DiskParseDirectory,
-	&xbox::ObpDefaultObject,
+	xbox::ObpDefaultObjectAddress(),
 	'kisD'
 };
 

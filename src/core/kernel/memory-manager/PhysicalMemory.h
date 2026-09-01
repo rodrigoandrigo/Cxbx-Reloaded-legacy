@@ -42,12 +42,37 @@ typedef xbox::ulong_ptr_xt PAddr;
 typedef uint32_t u32;
 
 
+// This list belongs to the host memory manager, not to the emulated kernel.
+// It must use native pointers: xbox::LIST_ENTRY deliberately stores 32-bit
+// guest pointers and truncates heap addresses in the x64 UWP build.
+struct HostListEntry
+{
+	HostListEntry* Flink;
+	HostListEntry* Blink;
+};
+
+inline void HostInsertHeadList(HostListEntry* listHead, HostListEntry* entry)
+{
+	HostListEntry* next = listHead->Flink;
+	entry->Flink = next;
+	entry->Blink = listHead;
+	next->Blink = entry;
+	listHead->Flink = entry;
+}
+
+inline void HostRemoveEntryList(HostListEntry* entry)
+{
+	entry->Blink->Flink = entry->Flink;
+	entry->Flink->Blink = entry->Blink;
+	entry->Flink = entry->Blink = nullptr;
+}
+
 /* An entry of the list tracking the free pages on the system */
 typedef struct _FreeBlock
 {
 	xbox::PFN start;                        // starting page of the block
 	xbox::PFN_COUNT size;                   // number of pages in the block
-	xbox::LIST_ENTRY ListEntry;
+	HostListEntry ListEntry;
 }FreeBlock, *PFreeBlock;
 
 
@@ -145,7 +170,7 @@ class PhysicalMemory
 {
 	protected:
 		// doubly linked list tracking the free physical pages
-		xbox::LIST_ENTRY FreeList = { &FreeList , &FreeList };
+		HostListEntry FreeList = { &FreeList , &FreeList };
 		// highest pfn available for contiguous allocations
 		PAddr m_MaxContiguousPfn = XBOX_CONTIGUOUS_MEMORY_LIMIT;
 		// amount of free physical pages available for non-debugger usage

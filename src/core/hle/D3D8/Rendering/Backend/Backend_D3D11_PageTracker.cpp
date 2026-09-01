@@ -501,7 +501,9 @@ void CxbxPageTrackerInit()
 	// reset AFTER the memcpy, writes that happen between the memcpy passing a page
 	// and the reset would have their dirty bits cleared, leaving stale data in the
 	// mirror with no way to detect it later.
+#if !defined(CXBXR_UWP)
 	ResetWriteWatch((PVOID)CONTIG_BASE, CONTIG_SIZE);
+#endif
 
 	// Initial full upload of contiguous memory to GPU mirror.
 	// Must use an explicit box — the buffer is larger than CONTIG_SIZE
@@ -517,6 +519,10 @@ void CxbxPageTrackerInit()
 	// Detect Wine — GetWriteWatch may not reliably track dirty pages.
 	// When running on Wine, always do a full upload on every flush.
 	s_bWineFallback = isWineEnv();
+#if defined(CXBXR_UWP)
+	s_bWineFallback = true;
+	EmuLog(LOG_LEVEL::INFO, "PageTracker: UWP full-upload fallback enabled");
+#endif
 	if (s_bWineFallback) {
 		EmuLog(LOG_LEVEL::INFO, "PageTracker: Wine detected — using full-upload fallback (GetWriteWatch unreliable)");
 	}

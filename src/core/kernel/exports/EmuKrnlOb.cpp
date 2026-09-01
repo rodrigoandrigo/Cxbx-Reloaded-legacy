@@ -42,6 +42,8 @@
 #include "EmuKrnl.h" // For OBJECT_TO_OBJECT_HEADER()
 #include "core\kernel\support\EmuFile.h" // For EmuNtSymbolicLinkObject, NtStatusToString(), etc.
 #include "core\kernel\support\NativeHandle.h"
+#include "core\kernel\memory-manager\VMManager.h"
+#include "core\kernel\memory-manager\GuestAllocation.h"
 #include <cassert>
 
 #pragma warning(disable:4005) // Ignore redefined status values
@@ -56,21 +58,55 @@
     ObjectString##Buffer                                                \
 }
 
-INITIALIZED_OBJECT_STRING(ObpDosDevicesString, "\\??");
-INITIALIZED_OBJECT_STRING(ObpIoDevicesString, "\\Device");
-INITIALIZED_OBJECT_STRING(ObpWin32NamedObjectsString, "\\Win32NamedObjects");
+#if defined(CXBXR_UWP)
+static xbox::POBJECT_STRING ObpDosDevicesString = xbox::zeroptr;
+static xbox::POBJECT_STRING ObpIoDevicesString = xbox::zeroptr;
+static xbox::POBJECT_STRING ObpWin32NamedObjectsString = xbox::zeroptr;
+
+static xbox::POBJECT_STRING AllocatePermanentObjectString(const char* value)
+{
+	const size_t length = std::strlen(value);
+	const size_t allocationSize = sizeof(xbox::OBJECT_STRING) + length + 1;
+	const auto address = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, allocationSize, false);
+	if (address == 0) {
+		return xbox::zeroptr;
+	}
+	auto result = reinterpret_cast<xbox::POBJECT_STRING>(address);
+	result->Length = static_cast<xbox::ushort_xt>(length);
+	result->MaximumLength = static_cast<xbox::ushort_xt>(length + 1);
+	result->Buffer = reinterpret_cast<xbox::PCHAR>(
+		static_cast<uintptr_t>(address) + sizeof(xbox::OBJECT_STRING));
+	std::memcpy(result->Buffer, value, length + 1);
+	return result;
+}
+#else
+INITIALIZED_OBJECT_STRING(ObpDosDevicesStringStorage, "\\??");
+INITIALIZED_OBJECT_STRING(ObpIoDevicesStringStorage, "\\Device");
+INITIALIZED_OBJECT_STRING(ObpWin32NamedObjectsStringStorage, "\\Win32NamedObjects");
+static xbox::POBJECT_STRING ObpDosDevicesString = &ObpDosDevicesStringStorage;
+static xbox::POBJECT_STRING ObpIoDevicesString = &ObpIoDevicesStringStorage;
+static xbox::POBJECT_STRING ObpWin32NamedObjectsString = &ObpWin32NamedObjectsStringStorage;
+#endif
 
 xbox::POBJECT_DIRECTORY ObpDosDevicesDirectoryObject;
 xbox::POBJECT_DIRECTORY ObpWin32NamedObjectsDirectoryObject;
 xbox::POBJECT_DIRECTORY ObpRootDirectoryObject;
 xbox::POBJECT_DIRECTORY ObpIoDevicesDirectoryObject;
+#if defined(CXBXR_UWP)
+xbox::PKEVENT xbox::ObpDefaultObjectPointer = xbox::zeroptr;
+#else
 xbox::KEVENT xbox::ObpDefaultObject;
+#endif
 
 XBSYSAPI EXPORTNUM(245) xbox::OBJECT_HANDLE_TABLE xbox::ObpObjectHandleTable = {
 
 };
 
 xbox::PVOID ObpDosDevicesDriveLetterMap['Z' - 'A' + 1];
+#if defined(CXBXR_UWP)
+static xbox::PPPVOID g_ObBuiltinRootTable = xbox::zeroptr;
+#endif
 
 // This mutex is necessary to guard access to the global ob variables above
 std::recursive_mutex g_ObMtx;
@@ -106,24 +142,29 @@ xbox::boolean_xt xbox::ObpCreatePermanentDirectoryObject(
 		LOG_FUNC_ARG(DirectoryObject)
 		LOG_FUNC_END;
 
-	OBJECT_ATTRIBUTES ObjectAttributes;
-	X_InitializeObjectAttributes(&ObjectAttributes, DirectoryName, OBJ_PERMANENT, zeroptr);
+	GuestAllocation<OBJECT_ATTRIBUTES> objectAttributesAllocation;
+	GuestAllocation<HANDLE> handleAllocation;
+	auto ObjectAttributes = objectAttributesAllocation.get();
+	auto Handle = handleAllocation.get();
+	if (!ObjectAttributes || !Handle) {
+		RETURN(FALSE);
+	}
+	X_InitializeObjectAttributes(ObjectAttributes, DirectoryName, OBJ_PERMANENT, zeroptr);
 
-	HANDLE Handle;
-	NTSTATUS result = NtCreateDirectoryObject(&Handle, &ObjectAttributes);
+	NTSTATUS result = NtCreateDirectoryObject(Handle, ObjectAttributes);
 
 	if (!X_NT_SUCCESS(result)) {
 		RETURN(FALSE);
 	}
 	
-	result = ObReferenceObjectByHandle(Handle, &ObDirectoryObjectType, (PVOID *)DirectoryObject);
+	result = ObReferenceObjectByHandle(*Handle, &ObDirectoryObjectType, (PVOID *)DirectoryObject);
 	
 	if (!X_NT_SUCCESS(result)) {
-		NtClose(Handle);
+		NtClose(*Handle);
 		RETURN(FALSE);
 	}
 
-	NtClose(Handle);
+	NtClose(*Handle);
 
 	RETURN(TRUE);
 }
@@ -283,30 +324,59 @@ static xbox::void_xt NTAPI ObpDeleteSymbolicLink(
 
 xbox::boolean_xt xbox::ObInitSystem()
 {
+#if defined(CXBXR_UWP)
+	ObpDosDevicesString = AllocatePermanentObjectString("\\??");
+	ObpIoDevicesString = AllocatePermanentObjectString("\\Device");
+	ObpWin32NamedObjectsString = AllocatePermanentObjectString("\\Win32NamedObjects");
+	if (!ObpDosDevicesString || !ObpIoDevicesString || !ObpWin32NamedObjectsString) {
+		return FALSE;
+	}
+#endif
 	ObpObjectHandleTable.HandleCount = 0;
 	ObpObjectHandleTable.FirstFreeTableEntry = -1;
 	ObpObjectHandleTable.NextHandleNeedingPool = 0;
+#if defined(CXBXR_UWP)
+	const auto rootTableAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE,
+		sizeof(xbox::PPVOID) * OB_TABLES_PER_SEGMENT, false);
+	if (rootTableAddress == 0) {
+		return FALSE;
+	}
+	g_ObBuiltinRootTable = reinterpret_cast<xbox::PPPVOID>(rootTableAddress);
+	std::memset(g_ObBuiltinRootTable, 0,
+		sizeof(xbox::PPVOID) * OB_TABLES_PER_SEGMENT);
+	ObpObjectHandleTable.RootTable = g_ObBuiltinRootTable;
+#else
 	ObpObjectHandleTable.RootTable = NULL;
+#endif
 
 	std::memset(ObpDosDevicesDriveLetterMap, 0, sizeof(ObpDosDevicesDriveLetterMap));
 
-	ObpDefaultObject.Header.Absolute = FALSE;
-	ObpDefaultObject.Header.Inserted = FALSE;
-	KeInitializeEvent(&ObpDefaultObject, SynchronizationEvent, TRUE);
+#if defined(CXBXR_UWP)
+	const auto defaultObjectAddress = g_VMManager.AllocateSystemMemory(
+		xbox::SystemMemoryType, XBOX_PAGE_READWRITE, sizeof(xbox::KEVENT), false);
+	if (defaultObjectAddress == 0) {
+		return FALSE;
+	}
+	ObpDefaultObjectPointer = reinterpret_cast<xbox::PKEVENT>(defaultObjectAddress);
+#endif
+	ObpDefaultObjectAddress()->Header.Absolute = FALSE;
+	ObpDefaultObjectAddress()->Header.Inserted = FALSE;
+	KeInitializeEvent(ObpDefaultObjectAddress(), SynchronizationEvent, TRUE);
 
 	if (!ObpCreatePermanentDirectoryObject(NULL, &ObpRootDirectoryObject)) {
 		return FALSE;
 	}
 
-	if (!ObpCreatePermanentDirectoryObject(&ObpDosDevicesString, &ObpDosDevicesDirectoryObject)) {
+	if (!ObpCreatePermanentDirectoryObject(ObpDosDevicesString, &ObpDosDevicesDirectoryObject)) {
 		return FALSE;
 	}
 
-	if (!ObpCreatePermanentDirectoryObject(&ObpIoDevicesString, &ObpIoDevicesDirectoryObject)) {
+	if (!ObpCreatePermanentDirectoryObject(ObpIoDevicesString, &ObpIoDevicesDirectoryObject)) {
 		return FALSE;
 	}
 
-	if (!ObpCreatePermanentDirectoryObject(&ObpWin32NamedObjectsString, &ObpWin32NamedObjectsDirectoryObject)) {
+	if (!ObpCreatePermanentDirectoryObject(ObpWin32NamedObjectsString, &ObpWin32NamedObjectsDirectoryObject)) {
 		return FALSE;
 	}
 
@@ -320,24 +390,40 @@ xbox::boolean_xt xbox::ObpExtendObjectHandleTable()
 		return FALSE;
 	}
 
-	PVOID **NewRootTable;
+	PPPVOID NewRootTable;
 	SIZE_T NewRootTableSize;
 	if ((HandleToUlong(ObpObjectHandleTable.NextHandleNeedingPool) & (sizeof(PVOID) * OB_HANDLES_PER_SEGMENT - 1)) == 0) {
 		if (ObpObjectHandleTable.NextHandleNeedingPool == NULL) {
+#if defined(CXBXR_UWP)
+			NewRootTable = g_ObBuiltinRootTable;
+#else
 			NewRootTable = ObpObjectHandleTable.BuiltinRootTable;
+#endif
 		} else {
-			SIZE_T OldRootTableSize = HandleToUlong(ObpObjectHandleTable.NextHandleNeedingPool) / (sizeof(PVOID*) * OB_HANDLES_PER_TABLE);
+			SIZE_T OldRootTableSize = HandleToUlong(ObpObjectHandleTable.NextHandleNeedingPool) / (sizeof(PPVOID) * OB_HANDLES_PER_TABLE);
 			NewRootTableSize = OldRootTableSize + OB_TABLES_PER_SEGMENT;
 
-			NewRootTable = (PVOID**)ExAllocatePoolWithTag(sizeof(PVOID*) * NewRootTableSize, 'rHbO');
+			const size_t rootTableBytes = sizeof(PPVOID) * NewRootTableSize;
+			if (rootTableBytes > UINT32_MAX) {
+				ExFreePool(reinterpret_cast<PVOID>(reinterpret_cast<uintptr_t>(NewTable)));
+				return FALSE;
+			}
+			NewRootTable = reinterpret_cast<PPPVOID>(
+				ExAllocatePoolWithTag(static_cast<size_xt>(rootTableBytes), 'rHbO'));
 			if (NewRootTable == NULL) {
-				ExFreePool(NewTable);
+				ExFreePool(reinterpret_cast<PVOID>(reinterpret_cast<uintptr_t>(NewTable)));
 				return FALSE;
 			}
 
-			RtlCopyMemory(NewRootTable, ObpObjectHandleTable.RootTable, sizeof(PVOID*) * OldRootTableSize);
+			RtlCopyMemory(NewRootTable, ObpObjectHandleTable.RootTable, sizeof(PPVOID) * OldRootTableSize);
 
-			if (ObpObjectHandleTable.RootTable != ObpObjectHandleTable.BuiltinRootTable) {
+			if (
+#if defined(CXBXR_UWP)
+				ObpObjectHandleTable.RootTable != g_ObBuiltinRootTable
+#else
+				ObpObjectHandleTable.RootTable != ObpObjectHandleTable.BuiltinRootTable
+#endif
+			) {
 				ExFreePool(ObpObjectHandleTable.RootTable);
 			}
 		}
@@ -345,11 +431,12 @@ xbox::boolean_xt xbox::ObpExtendObjectHandleTable()
 		ObpObjectHandleTable.RootTable = NewRootTable;
 	}
 
-	ObpGetTableFromHandle(ObpObjectHandleTable.NextHandleNeedingPool) = NewTable;
+	ObpGetTableFromHandle(ObpObjectHandleTable.NextHandleNeedingPool) =
+		reinterpret_cast<PPVOID>(reinterpret_cast<uintptr_t>(NewTable));
 	HANDLE Handle = ObpObjectHandleTable.NextHandleNeedingPool;
 	PVOID *HandleContents = NewTable;
 	LONG_PTR FreeHandleLink = ObpEncodeFreeHandleLink(Handle);
-	ObpObjectHandleTable.FirstFreeTableEntry = FreeHandleLink;
+	ObpObjectHandleTable.FirstFreeTableEntry = static_cast<long_ptr_xt>(FreeHandleLink);
 
 	for (ULONG Index = 0; Index < OB_HANDLES_PER_TABLE - 1; Index++) {
 		FreeHandleLink += sizeof(PVOID);
@@ -629,7 +716,7 @@ XBSYSAPI EXPORTNUM(240) xbox::OBJECT_TYPE xbox::ObDirectoryObjectType =
 	NULL,
 	NULL,
 	NULL,
-	&xbox::ObpDefaultObject,
+	xbox::ObpDefaultObjectAddress(),
 	'eriD' // = first four characters of "Directory" in reverse
 };
 
@@ -1247,7 +1334,7 @@ XBSYSAPI EXPORTNUM(249) xbox::OBJECT_TYPE xbox::ObSymbolicLinkObjectType =
 	NULL,
 	ObpDeleteSymbolicLink,
 	NULL,
-	&xbox::ObpDefaultObject,
+	xbox::ObpDefaultObjectAddress(),
 	'bmyS' // = first four characters of "SymbolicLink" in reverse
 };
 

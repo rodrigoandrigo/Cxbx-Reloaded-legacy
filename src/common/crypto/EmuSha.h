@@ -42,5 +42,9 @@ void SHA1Init(SHA1_CTX* context);
 void SHA1Update(SHA1_CTX* context, const unsigned char* data, uint32_t len);
 void SHA1Final(unsigned char digest[A_SHA_DIGEST_LEN], SHA1_CTX* context);
 void CalcSHA1Hash(unsigned char digest[A_SHA_DIGEST_LEN], const unsigned char* data, uint32_t len);
+void CxbxHostHMAC(const uint8_t* key, uint32_t keyLength,
+	const uint8_t* data, uint32_t dataLength,
+	const uint8_t* data2, uint32_t data2Length,
+	uint8_t digest[A_SHA_DIGEST_LEN]);
 
 #endif

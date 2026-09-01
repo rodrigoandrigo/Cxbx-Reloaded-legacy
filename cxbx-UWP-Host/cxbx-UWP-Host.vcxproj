@@ -308,6 +308,9 @@
     </Content>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="RejectNonX64HostBuild" BeforeTargets="PrepareForBuild" Condition="'$(Platform)'!='x64'">
+    <Error Text="cxbx-UWP-Host requires Platform=x64 because cxbxr-emu.dll and qemu-cxbx-i386.dll are x64 host modules." />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ImageContentTask.targets" />
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\MeshContentTask.targets" />
