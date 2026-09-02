@@ -374,6 +374,18 @@ xbox::void_xt xbox::KeInitializeThread(
 	IN PKPROCESS Process
 )
 {
+#if defined(CXBXR_UWP)
+	// Xbox kernel addresses commonly have bit 31 set. Normalize the 32-bit ABI
+	// value before native x64 code dereferences the process object; otherwise
+	// MSVC may use its sign-extended register value (0xffffffffd...).
+	const uint32_t processAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(Process));
+	auto* processNative = reinterpret_cast<KPROCESS*>(
+		static_cast<uintptr_t>(processAddress));
+	Process = reinterpret_cast<PKPROCESS>(static_cast<uintptr_t>(processAddress));
+#else
+	auto* processNative = Process;
+#endif
 	/* ReactOS's KeInitThread inline code begin */
 
 	/* Initialize the Dispatcher Header */
@@ -428,8 +440,7 @@ xbox::void_xt xbox::KeInitializeThread(
 	else
 #endif
 	{
-		Thread->ApcState.Process = &KiUniqueProcess;
-		Thread->ApcState.Process->ThreadQuantum = KiUniqueProcess.ThreadQuantum;
+		Thread->ApcState.Process = Process;
 	}
 #if defined(CXBXR_UWP)
 	if constexpr (IsHostThread) {
@@ -527,20 +538,20 @@ xbox::void_xt xbox::KeInitializeThread(
 	// NOTE: The cxbxr's kernel initialization will not be insert into ThreadListHead of Process.
 	if constexpr (!IsHostThread) {
 		/* Setup static fields from parent */
-		Thread->DisableBoost = Process->DisableBoost;
-		Thread->Quantum = Process->ThreadQuantum;
+		Thread->DisableBoost = processNative->DisableBoost;
+		Thread->Quantum = processNative->ThreadQuantum;
 
 		/* Setup volatile data */
-		Thread->Priority = Process->BasePriority;
-		Thread->BasePriority = Process->BasePriority;
+		Thread->Priority = processNative->BasePriority;
+		Thread->BasePriority = processNative->BasePriority;
 
 		/* Lock the Dispatcher Database */
 		UCHAR orig_irql = KeRaiseIrqlToDpcLevel();
 
 		/* Insert the thread into the process list */
-		InsertTailList(&Process->ThreadListHead, &Thread->ThreadListEntry);
+		InsertTailList(&processNative->ThreadListHead, &Thread->ThreadListEntry);
 		/* Increase the stack count */
-		Process->StackCount++;
+		processNative->StackCount++;
 
 		/* Release lock and return */
 		KfLowerIrql(orig_irql);

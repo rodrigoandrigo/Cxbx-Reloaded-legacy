@@ -668,9 +668,26 @@ xbox::ntstatus_xt xbox::ObpResolveLinkTarget(
 	PVOID* LinkTargetObject
 )
 {
+	// Guest kernel pointers live in a 32-bit address space.  MSVC may carry a
+	// __ptr32 value in a sign-extended x64 register when the address is in the
+	// Xbox kernel range (0x80000000-0xffffffff).  Normalize it explicitly before
+	// native object-manager code dereferences the structure.
+	const uint32_t linkTargetAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(LinkTarget));
+	const auto* linkTargetNative = reinterpret_cast<const OBJECT_STRING*>(
+		static_cast<uintptr_t>(linkTargetAddress));
+	if (linkTargetAddress == 0) {
+		return X_STATUS_INVALID_PARAMETER;
+	}
+
 	/* Verify RemainingName has string and contain path separator */
-	OBJECT_STRING RemainingName = *LinkTarget;
-	if (!RemainingName.Length || RemainingName.Buffer[0] != OBJ_NAME_PATH_SEPARATOR) {
+	OBJECT_STRING RemainingName = *linkTargetNative;
+	const uint32_t remainingBufferAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(RemainingName.Buffer));
+	const auto* remainingBufferNative = reinterpret_cast<const CHAR*>(
+		static_cast<uintptr_t>(remainingBufferAddress));
+	if (!RemainingName.Length || remainingBufferAddress == 0 ||
+		remainingBufferNative[0] != OBJ_NAME_PATH_SEPARATOR) {
 		return X_STATUS_INVALID_PARAMETER;
 	}
 
@@ -686,7 +703,12 @@ xbox::ntstatus_xt xbox::ObpResolveLinkTarget(
 		}
 
 		/* Verify RemainingName does not have multiple backslashes */
-		if (RemainingName.Length && RemainingName.Buffer[0] == OBJ_NAME_PATH_SEPARATOR) {
+		const uint32_t currentBufferAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(RemainingName.Buffer));
+		const auto* currentBufferNative = reinterpret_cast<const CHAR*>(
+			static_cast<uintptr_t>(currentBufferAddress));
+		if (RemainingName.Length && (currentBufferAddress == 0 ||
+			currentBufferNative[0] == OBJ_NAME_PATH_SEPARATOR)) {
 			break;
 		}
 

@@ -327,12 +327,17 @@ static xbox::ntstatus_xt EmuBindDeviceNameToObjectType(xbox::STRING& xTargetName
 	// OBJECT_ATTRIBUTES::ObjectName is an Xbox 32-bit pointer. The STRING
 	// object itself therefore has to live in guest memory even though its
 	// character buffer was already materialized there by RtlInitAnsiStringHost.
-	auto guestTargetName = static_cast<xbox::PSTRING>(
-		xbox::ExAllocatePoolWithTag(sizeof(xbox::STRING), 'nDbO'));
-	if (guestTargetName == nullptr) {
+	const uint32_t guestTargetNameAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(xbox::ExAllocatePoolWithTag(
+			sizeof(xbox::STRING), 'nDbO')));
+	if (guestTargetNameAddress == 0) {
 		return X_STATUS_INSUFFICIENT_RESOURCES;
 	}
-	*guestTargetName = xTargetName;
+	auto* guestTargetNameNative = reinterpret_cast<xbox::STRING*>(
+		static_cast<uintptr_t>(guestTargetNameAddress));
+	*guestTargetNameNative = xTargetName;
+	xbox::PSTRING guestTargetName = reinterpret_cast<xbox::PSTRING>(
+		static_cast<uintptr_t>(guestTargetNameAddress));
 	#else
 	auto guestTargetName = &xTargetName;
 	#endif
@@ -346,14 +351,19 @@ static xbox::ntstatus_xt EmuBindDeviceNameToObjectType(xbox::STRING& xTargetName
 	if (X_NT_SUCCESS(result)) {
 		xbox::HANDLE xHandle;
 		#if defined(CXBXR_UWP)
-		auto guestHandle = static_cast<xbox::PHANDLE>(
-			xbox::ExAllocatePoolWithTag(sizeof(xbox::HANDLE), 'hDbO'));
-		if (guestHandle == nullptr) {
+		const uint32_t guestHandleAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(xbox::ExAllocatePoolWithTag(
+				sizeof(xbox::HANDLE), 'hDbO')));
+		if (guestHandleAddress == 0) {
 			result = X_STATUS_INSUFFICIENT_RESOURCES;
 		}
 		else {
+			auto* guestHandleNative = reinterpret_cast<xbox::HANDLE*>(
+				static_cast<uintptr_t>(guestHandleAddress));
+			xbox::PHANDLE guestHandle = reinterpret_cast<xbox::PHANDLE>(
+				static_cast<uintptr_t>(guestHandleAddress));
 			result = xbox::ObInsertObject(TargetDirectoryObject, &objAttrs, 0, guestHandle);
-			xHandle = *guestHandle;
+			xHandle = *guestHandleNative;
 			xbox::ExFreePool(guestHandle);
 		}
 		#else

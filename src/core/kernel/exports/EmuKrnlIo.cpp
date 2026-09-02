@@ -433,14 +433,19 @@ XBSYSAPI EXPORTNUM(65) xbox::ntstatus_xt NTAPI xbox::IoCreateDevice
 		/* Insert the Object */
 		xbox::HANDLE handle;
 		#if defined(CXBXR_UWP)
-		auto guestHandle = static_cast<PHANDLE>(
-			ExAllocatePoolWithTag(sizeof(HANDLE), 'hDvI'));
-		if (guestHandle == nullptr) {
+		const uint32_t guestHandleAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(ExAllocatePoolWithTag(
+				sizeof(HANDLE), 'hDvI')));
+		if (guestHandleAddress == 0) {
 			result = X_STATUS_INSUFFICIENT_RESOURCES;
 		}
 		else {
+			auto* guestHandleNative = reinterpret_cast<HANDLE*>(
+				static_cast<uintptr_t>(guestHandleAddress));
+			PHANDLE guestHandle = reinterpret_cast<PHANDLE>(
+				static_cast<uintptr_t>(guestHandleAddress));
 			result = ObInsertObject(CreatedDeviceObject, &ObjectAttributes, 1, guestHandle);
-			handle = *guestHandle;
+			handle = *guestHandleNative;
 			ExFreePool(guestHandle);
 		}
 		#else
@@ -694,11 +699,40 @@ XBSYSAPI EXPORTNUM(67) xbox::ntstatus_xt NTAPI xbox::IoCreateSymbolicLink
 		LOG_FUNC_ARG(DeviceName)
 		LOG_FUNC_END;
 
-	/* Initialize the object attributes and create the link */
+	/* Initialize the object attributes and create the link. */
+#if defined(CXBXR_UWP)
+	// NtCreateSymbolicLinkObject is an Xbox export: all pointers in its ABI are
+	// 32-bit guest pointers.  A native x64 stack HANDLE used here was truncated
+	// by ObInsertObject when it wrote the result.  Keep both in/out structures in
+	// guest-addressable pool storage and only retain the scalar handle natively.
+	const uint32_t storageAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(ExAllocatePoolWithTag(
+			sizeof(HANDLE) + sizeof(OBJECT_ATTRIBUTES), 'kLnI')));
+	if (storageAddress == 0) {
+		RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
+	}
+	auto* linkHandleNative = reinterpret_cast<HANDLE*>(
+		static_cast<uintptr_t>(storageAddress));
+	auto* objectAttrNative = reinterpret_cast<OBJECT_ATTRIBUTES*>(
+		static_cast<uintptr_t>(storageAddress + sizeof(HANDLE)));
+	*linkHandleNative = zeroptr;
+	X_InitializeObjectAttributes(objectAttrNative, SymbolicLinkName,
+		OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, zeroptr);
+	PHANDLE linkHandleGuest = reinterpret_cast<PHANDLE>(
+		static_cast<uintptr_t>(storageAddress));
+	POBJECT_ATTRIBUTES objectAttrGuest = reinterpret_cast<POBJECT_ATTRIBUTES>(
+		static_cast<uintptr_t>(storageAddress + sizeof(HANDLE)));
+	ntstatus_xt result = NtCreateSymbolicLinkObject(
+		linkHandleGuest, objectAttrGuest, DeviceName);
+	const HANDLE LinkHandle = *linkHandleNative;
+	ExFreePool(reinterpret_cast<PVOID>(static_cast<uintptr_t>(storageAddress)));
+#else
 	HANDLE LinkHandle;
 	OBJECT_ATTRIBUTES objectAttr;
-	X_InitializeObjectAttributes(&objectAttr, SymbolicLinkName, OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, zeroptr);
+	X_InitializeObjectAttributes(&objectAttr, SymbolicLinkName,
+		OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, zeroptr);
 	ntstatus_xt result = NtCreateSymbolicLinkObject(&LinkHandle, &objectAttr, DeviceName);
+#endif
 
 	if (X_NT_SUCCESS(result)) {
 		NtClose(LinkHandle);

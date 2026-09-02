@@ -114,18 +114,32 @@ static unsigned int WINAPI PCSTProxy
 	// Do minimal thread initialization
 	xbox::PETHREAD eThread = static_cast<xbox::PETHREAD>(params.Ethread);
 #if defined(CXBXR_UWP)
+	const uint32_t eThreadAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(eThread));
+	auto* eThreadNative = reinterpret_cast<xbox::ETHREAD*>(
+		static_cast<uintptr_t>(eThreadAddress));
+#else
+	auto* eThreadNative = eThread;
+#endif
+#if defined(CXBXR_UWP)
 	EmuGenerateFS(eThread);
 #elif !defined(ENABLE_KTHREAD_SWITCHING)
 	EmuGenerateFS(eThread, Host2XbStackBaseReserved, Host2XbStackSizeReserved);
 #else
 	EmuGenerateFS(eThread);
 #endif
-	xbox::PKSTART_FRAME StartFrame = reinterpret_cast<xbox::PKSTART_FRAME>(reinterpret_cast<xbox::addr_xt>(eThread->Tcb.KernelStack) + sizeof(xbox::KSWITCHFRAME));
+	const uint32_t startFrameAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(eThreadNative->Tcb.KernelStack)) +
+		sizeof(xbox::KSWITCHFRAME);
+	auto* StartFrameNative = reinterpret_cast<xbox::KSTART_FRAME*>(
+		static_cast<uintptr_t>(startFrameAddress));
+	xbox::PKSTART_FRAME StartFrame = reinterpret_cast<xbox::PKSTART_FRAME>(
+		static_cast<uintptr_t>(startFrameAddress));
 
 	LOG_PCSTProxy(
-		StartFrame->StartRoutine,
-		StartFrame->StartContext,
-		StartFrame->SystemRoutine,
+		StartFrameNative->StartRoutine,
+		StartFrameNative->StartContext,
+		StartFrameNative->SystemRoutine,
 		params.Ethread,
 		params.TlsDataSize);
 
@@ -133,16 +147,16 @@ static unsigned int WINAPI PCSTProxy
 
 #if defined(CXBXR_UWP)
 	const uint32_t systemRoutine = static_cast<uint32_t>(
-		reinterpret_cast<uintptr_t>(StartFrame->SystemRoutine));
+		reinterpret_cast<uintptr_t>(StartFrameNative->SystemRoutine));
 	const uint32_t startupProxy = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(&PspSystemThreadStartup));
 	const uint32_t guestSystemRoutine = systemRoutine == startupProxy ? 0 : systemRoutine;
 	const uint32_t startRoutine = static_cast<uint32_t>(
-		reinterpret_cast<uintptr_t>(StartFrame->StartRoutine));
+		reinterpret_cast<uintptr_t>(StartFrameNative->StartRoutine));
 	const uint32_t startContext = static_cast<uint32_t>(
-		reinterpret_cast<uintptr_t>(StartFrame->StartContext));
+		reinterpret_cast<uintptr_t>(StartFrameNative->StartContext));
 	const uint32_t stackPointer = static_cast<uint32_t>(
-		reinterpret_cast<uintptr_t>(eThread->Tcb.KernelStack));
+		reinterpret_cast<uintptr_t>(eThreadNative->Tcb.KernelStack));
 	const uint32_t fsBase = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
 	uint32_t exceptionVector = 0;

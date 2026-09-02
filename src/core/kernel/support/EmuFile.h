@@ -64,12 +64,17 @@ inline xbox::ntstatus_xt CxbxIoCreateDeviceFromHost(
 #if defined(CXBXR_UWP)
 	xbox::PSTRING guestName = nullptr;
 	if (deviceName != nullptr) {
-		guestName = static_cast<xbox::PSTRING>(
-			xbox::ExAllocatePoolWithTag(sizeof(xbox::STRING), 'nDvI'));
-		if (guestName == nullptr) {
+		const uint32_t guestNameAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(xbox::ExAllocatePoolWithTag(
+				sizeof(xbox::STRING), 'nDvI')));
+		if (guestNameAddress == 0) {
 			return X_STATUS_INSUFFICIENT_RESOURCES;
 		}
-		*guestName = *deviceName;
+		auto* guestNameNative = reinterpret_cast<xbox::STRING*>(
+			static_cast<uintptr_t>(guestNameAddress));
+		*guestNameNative = *deviceName;
+		guestName = reinterpret_cast<xbox::PSTRING>(
+			static_cast<uintptr_t>(guestNameAddress));
 	}
 	const auto result = xbox::IoCreateDevice(driverObject, extensionSize,
 		guestName, deviceType, exclusive, deviceObject);
@@ -87,13 +92,18 @@ inline xbox::ntstatus_xt CxbxIoCreateSymbolicLinkFromHost(
 	const xbox::STRING& symbolicLinkName, const xbox::STRING& deviceName)
 {
 #if defined(CXBXR_UWP)
-	auto guestNames = static_cast<xbox::PSTRING>(xbox::ExAllocatePoolWithTag(
-		2 * sizeof(xbox::STRING), 'lSvI'));
-	if (guestNames == nullptr) {
+	const uint32_t guestNamesAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(xbox::ExAllocatePoolWithTag(
+			2 * sizeof(xbox::STRING), 'lSvI')));
+	if (guestNamesAddress == 0) {
 		return X_STATUS_INSUFFICIENT_RESOURCES;
 	}
-	guestNames[0] = symbolicLinkName;
-	guestNames[1] = deviceName;
+	auto* guestNamesNative = reinterpret_cast<xbox::STRING*>(
+		static_cast<uintptr_t>(guestNamesAddress));
+	guestNamesNative[0] = symbolicLinkName;
+	guestNamesNative[1] = deviceName;
+	xbox::PSTRING guestNames = reinterpret_cast<xbox::PSTRING>(
+		static_cast<uintptr_t>(guestNamesAddress));
 	const auto result = xbox::IoCreateSymbolicLink(&guestNames[0], &guestNames[1]);
 	xbox::ExFreePool(guestNames);
 	return result;

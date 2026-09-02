@@ -1215,13 +1215,18 @@ void xbox::RtlInitAnsiStringHost(ANSI_STRING& DestinationString, const char* Sou
 	}
 
 #if defined(CXBXR_UWP)
-	PCHAR guestBuffer = static_cast<PCHAR>(
-		ExAllocatePoolWithTag(sourceLength + 1, 'sAtR'));
-	if (guestBuffer == nullptr) {
+	const uint32_t guestBufferAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(ExAllocatePoolWithTag(
+			sourceLength + 1, 'sAtR')));
+	if (guestBufferAddress == 0) {
 		CxbxrAbort("RtlInitAnsiStringHost: unable to allocate guest string");
 		return;
 	}
-	std::memcpy(guestBuffer, SourceString, sourceLength + 1);
+	auto* guestBufferNative = reinterpret_cast<char*>(
+		static_cast<uintptr_t>(guestBufferAddress));
+	std::memcpy(guestBufferNative, SourceString, sourceLength + 1);
+	PCHAR guestBuffer = reinterpret_cast<PCHAR>(
+		static_cast<uintptr_t>(guestBufferAddress));
 	DestinationString.Buffer = guestBuffer;
 #else
 	DestinationString.Buffer = const_cast<PCHAR>(SourceString);

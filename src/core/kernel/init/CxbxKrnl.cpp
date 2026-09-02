@@ -47,6 +47,7 @@
 #include "core\hle\JVS\JVS.h" // For JVS_Init
 #include "core\hle\Intercept.hpp"
 #include "core\kernel\memory-manager\VMManager.h"
+#include "core\kernel\memory-manager\GuestAllocation.h"
 #include "CxbxDebugger.h"
 #include "common/util/cliConfig.hpp"
 #include "common/CxbxEmbedRuntime.h"
@@ -1607,11 +1608,22 @@ static void CxbxrKrnlInitHacks()
 	EmuX86_Init();
 	EmuLogInit(LOG_LEVEL::INFO, "Starting system event thread...");
 	// Start the event thread
-	xbox::HANDLE hThread;
-	xbox::PsCreateSystemThread(&hThread, xbox::zeroptr, system_events, xbox::zeroptr, FALSE);
+	GuestAllocation<xbox::HANDLE> threadHandleAllocation;
+	auto* threadHandleNative = threadHandleAllocation.get();
+	if (threadHandleNative == nullptr) {
+		CxbxrAbort("Unable to allocate guest thread handle storage");
+		return;
+	}
+	const uint32_t threadHandleAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(threadHandleNative));
+	xbox::PHANDLE threadHandleGuest = reinterpret_cast<xbox::PHANDLE>(
+		static_cast<uintptr_t>(threadHandleAddress));
+	xbox::PsCreateSystemThread(threadHandleGuest, xbox::zeroptr,
+		system_events, xbox::zeroptr, FALSE);
 	EmuLogInit(LOG_LEVEL::INFO, "Launching XBE entry point thread...");
 	// Launch the xbe
-	xbox::PsCreateSystemThread(&hThread, xbox::zeroptr, CxbxLaunchXbe, Entry, FALSE);
+	xbox::PsCreateSystemThread(threadHandleGuest, xbox::zeroptr,
+		CxbxLaunchXbe, Entry, FALSE);
 
 	// NOTE: The DPC/ISR dispatch loop conceptually runs on the Xbox's single
 	// CPU alongside game threads. Pinning it to the Xbox core matches real HW

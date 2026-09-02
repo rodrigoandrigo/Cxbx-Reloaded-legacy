@@ -732,6 +732,14 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 {
 	xbox::PVOID base;
 	xbox::ulong_xt size;
+#if defined(CXBXR_UWP)
+	const uint32_t initialEthreadAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(Ethread));
+	auto* EthreadNative = reinterpret_cast<xbox::ETHREAD*>(
+		static_cast<uintptr_t>(initialEthreadAddress));
+#else
+	auto* EthreadNative = Ethread;
+#endif
 
 	// Allocate the xbox KPCR structure
 	base = xbox::zeroptr;
@@ -845,12 +853,15 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 		xbox::NtAllocateVirtualMemory(&base, 0, &size, XBOX_MEM_RESERVE | XBOX_MEM_COMMIT, XBOX_PAGE_READWRITE);
 	#endif
 		Ethread = (xbox::PETHREAD)base;
+		EthreadNative = reinterpret_cast<xbox::ETHREAD*>(
+			static_cast<uintptr_t>(static_cast<uint32_t>(
+				reinterpret_cast<uintptr_t>(Ethread))));
 		xbox::RtlZeroMemory(Ethread, sizeof(xbox::ETHREAD)); // Clear, to prevent side-effects on random contents
 	#if defined(CXBXR_UWP)
 		EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: ETHREAD allocated at 0x%08X", static_cast<unsigned>(reinterpret_cast<uintptr_t>(Ethread)));
 	#endif
 		// Initialize the IRP tracking list for this thread
-		InitializeListHead(&Ethread->IrpList);
+		InitializeListHead(&EthreadNative->IrpList);
 		// Emulate kernel stack size as we can't use exact size.
 	#if defined(CXBXR_UWP)
 		xbox::ulong_xt KernelStackSize = KERNEL_STACK_SIZE;
@@ -867,7 +878,7 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 		// Since the cxbxr's kernel initialization occur there, we do not create a new thread
 		// and therefore doesn't need to set any additional System/Start details set in the xbox's kernel stack.
 		xbox::KeInitializeThread<IsHostThread>(
-			&Ethread->Tcb,
+			&EthreadNative->Tcb,
 			KernelStack,
 			KernelStackSize,
 			xbox::zero,
@@ -879,28 +890,32 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 		EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KeInitializeThread completed");
 	#endif
 	}
-#ifndef ENABLE_KTHREAD_SWITCHING
+#if !defined(ENABLE_KTHREAD_SWITCHING) && !defined(CXBXR_UWP)
 	else {
 		// Otherwise, xbox::PsCreateSystemThreadEx is called and xbox::KeInitializeThread is already called from it.
 		// But we need to carry the reserved part onto host's stack to able align with xbox and host sharing the same stack in a new thread.
 		// Since we are using direct execution than in virtualization environment.
 		// Tcb.StackBase always point at the beginning of kernel stack (DOWN).
-		xbox::addr_xt xStackBase = reinterpret_cast<xbox::addr_xt>(Ethread->Tcb.StackBase);
-		xbox::addr_xt xStackLimit = reinterpret_cast<xbox::addr_xt>(Ethread->Tcb.StackLimit);
-		xbox::addr_xt xTlsData = reinterpret_cast<xbox::addr_xt>(Ethread->Tcb.TlsData);
-		xbox::addr_xt xKernelStack = reinterpret_cast<xbox::addr_xt>(Ethread->Tcb.KernelStack);
+		xbox::addr_xt xStackBase = reinterpret_cast<xbox::addr_xt>(EthreadNative->Tcb.StackBase);
+		xbox::addr_xt xStackLimit = reinterpret_cast<xbox::addr_xt>(EthreadNative->Tcb.StackLimit);
+		xbox::addr_xt xTlsData = reinterpret_cast<xbox::addr_xt>(EthreadNative->Tcb.TlsData);
+		xbox::addr_xt xKernelStack = reinterpret_cast<xbox::addr_xt>(EthreadNative->Tcb.KernelStack);
 		xbox::dword_xt xKernelStackSize = xStackBase - xKernelStack;
 		assert(xKernelStackSize <= Host2XbStackSizeReserved);
 		PVOID hKernelStack = reinterpret_cast<PVOID>(Host2XbStackBaseReserved - xKernelStackSize);
-		std::memcpy(hKernelStack, Ethread->Tcb.KernelStack, xKernelStackSize);
+		const uint32_t kernelStackAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(EthreadNative->Tcb.KernelStack));
+		const auto* kernelStackNative = reinterpret_cast<const void*>(
+			static_cast<uintptr_t>(kernelStackAddress));
+		std::memcpy(hKernelStack, kernelStackNative, xKernelStackSize);
 		// Update TlsData address if used
-		if (Ethread->Tcb.TlsData) {
-			Ethread->Tcb.TlsData = reinterpret_cast<xbox::PVOID>(Host2XbStackBaseReserved - (xStackBase - xTlsData));
+		if (EthreadNative->Tcb.TlsData) {
+			EthreadNative->Tcb.TlsData = reinterpret_cast<xbox::PVOID>(Host2XbStackBaseReserved - (xStackBase - xTlsData));
 		}
 		// Set stacks addresses
-		Ethread->Tcb.StackBase = reinterpret_cast<xbox::PVOID>(Host2XbStackBaseReserved);
-		Ethread->Tcb.StackLimit = hTib->StackLimit; // Always point to host's StackLimit.
-		Ethread->Tcb.KernelStack = hKernelStack;
+		EthreadNative->Tcb.StackBase = reinterpret_cast<xbox::PVOID>(Host2XbStackBaseReserved);
+		EthreadNative->Tcb.StackLimit = hTib->StackLimit; // Always point to host's StackLimit.
+		EthreadNative->Tcb.KernelStack = hKernelStack;
 		// We can safely delete kernel stack as there is no virtualization environment implemented.
 		xbox::MmDeleteKernelStack(reinterpret_cast<xbox::PVOID>(xStackBase), reinterpret_cast<xbox::PVOID>(xStackLimit));
 	}
@@ -910,12 +925,12 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 	// As far as I have seen, Xapi's CreateThread's startup function is the only one that does the tls' initialization.
 	// It will repeat same process yet will not cause performance impact.
 	// NOTE: PsCreateSystemThread's startup function does not do tls' initialization.
-	if (Ethread->Tcb.TlsData) {
+	if (EthreadNative->Tcb.TlsData) {
 		Xbe::TLS* XbeTls = (Xbe::TLS*)CxbxKrnl_Xbe->m_Header.dwTLSAddr;
 		uint32_t RawTlsDataSize = XbeTls->dwDataEndAddr - XbeTls->dwDataStartAddr;
 		// First index is a pointer to the array of tls datas.
-		xbox::addr_xt* TlsData = reinterpret_cast<xbox::addr_xt*>(Ethread->Tcb.TlsData);
-		*TlsData = reinterpret_cast<xbox::addr_xt>(Ethread->Tcb.TlsData) + sizeof(xbox::addr_xt);
+		xbox::addr_xt* TlsData = reinterpret_cast<xbox::addr_xt*>(EthreadNative->Tcb.TlsData);
+		*TlsData = reinterpret_cast<xbox::addr_xt>(EthreadNative->Tcb.TlsData) + sizeof(xbox::addr_xt);
 		// Set the actual tls data from xbe.
 		TlsData += 1;
 		std::memcpy(TlsData, reinterpret_cast<xbox::PVOID>(XbeTls->dwDataStartAddr), RawTlsDataSize);
@@ -929,8 +944,8 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 	{
 		// TODO: Do we need NtTib's overwrite in ENABLE_KTHREAD_SWITCHING usage?
 		// Set the stack details over to NtTib's structure.
-		NewPcr->NtTib.StackBase = EmuGetTIBStackBase(Ethread->Tcb.StackBase);
-		NewPcr->NtTib.StackLimit = Ethread->Tcb.StackLimit;
+		NewPcr->NtTib.StackBase = EmuGetTIBStackBase(EthreadNative->Tcb.StackBase);
+		NewPcr->NtTib.StackLimit = EthreadNative->Tcb.StackLimit;
 		// Set PrcbData.CurrentThread
 		Prcb->CurrentThread = (xbox::PKTHREAD)Ethread;
 	}
@@ -950,7 +965,7 @@ void EmuGenerateFS(xbox::PETHREAD Ethread, unsigned Host2XbStackBaseReserved, un
 	EmuLogInit(LOG_LEVEL::INFO, "UWP thread bootstrap: KPCR installed for host thread");
 #endif
 
-	EmuLog(LOG_LEVEL::DEBUG, "Installed KPCR in TIB_ArbitraryDataSlot (with Ethread->Tcb.TlsData = 0x%.8X)", Ethread->Tcb.TlsData);
+	EmuLog(LOG_LEVEL::DEBUG, "Installed KPCR in TIB_ArbitraryDataSlot (with Ethread->Tcb.TlsData = 0x%.8X)", EthreadNative->Tcb.TlsData);
 
 	_controlfp(_PC_53, _MCW_PC); // Set Precision control to 53 bits (verified setting)
 	_controlfp(_RC_NEAR, _MCW_RC); // Set Rounding control to near (unsure about this)

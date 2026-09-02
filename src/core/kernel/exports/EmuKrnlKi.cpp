@@ -965,12 +965,30 @@ template<xbox::MODE ApcMode>
 static xbox::void_xt KiExecuteApc()
 {
 	xbox::PKTHREAD kThread = xbox::KeGetCurrentThread();
+#if defined(CXBXR_UWP)
+	const uint32_t threadAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(kThread));
+	auto* kThreadNative = reinterpret_cast<xbox::KTHREAD*>(
+		static_cast<uintptr_t>(threadAddress));
+#else
+	auto* kThreadNative = kThread;
+#endif
 
 	if constexpr (ApcMode == xbox::KernelMode) {
-		kThread->ApcState.KernelApcPending = FALSE;
+		// PCSTProxy invokes this checkpoint unconditionally. Do not walk an
+		// initialized-but-empty guest list unless the scheduler actually queued an
+		// APC; x64 sign extension of the list's 32-bit self pointer otherwise made
+		// the list appear non-empty and executed the truncated KiSuspendNop address.
+		if (!kThreadNative->ApcState.KernelApcPending) {
+			return;
+		}
+		kThreadNative->ApcState.KernelApcPending = FALSE;
 	}
 	else {
-		kThread->ApcState.UserApcPending = FALSE;
+		if (!kThreadNative->ApcState.UserApcPending) {
+			return;
+		}
+		kThreadNative->ApcState.UserApcPending = FALSE;
 	}
 
 	// Even though the apc list is per-thread, it's still possible that another thread will access it while we are processing it below
