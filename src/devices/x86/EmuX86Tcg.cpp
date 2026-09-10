@@ -32,7 +32,31 @@ extern std::atomic_bool g_bEnableAllInterrupts;
 namespace {
 int g_fieldPin = 0;
 std::mutex g_tcgMappingMutex;
+// QEMU owns one process-wide TCG/system-memory context.  Xbox threads are
+// represented by separate CPU register contexts, but backend operations must
+// still be serialized to preserve the single physical Xbox CPU semantics and
+// to avoid racing CPU realization with memory-region transactions.
+std::mutex g_tcgBackendMutex;
 std::unordered_set<uint64_t> g_tcgMappings;
+QemuCxbxCpu* g_tcgMappingCpu = nullptr;
+std::unordered_set<QemuCxbxCpu*> g_tcgCpus;
+bool g_tcgInitialMemoryImported = false;
+
+uint32_t TcgMemoryFlags(DWORD protection)
+{
+	uint32_t flags = QEMU_CXBX_CPU_MEMORY_READ |
+		QEMU_CXBX_CPU_MEMORY_HOST_POINTER;
+	const DWORD access = protection & 0xff;
+	if (access == PAGE_READWRITE || access == PAGE_WRITECOPY ||
+		access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY) {
+		flags |= QEMU_CXBX_CPU_MEMORY_WRITE;
+	}
+	if (access == PAGE_EXECUTE || access == PAGE_EXECUTE_READ ||
+		access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY) {
+		flags |= QEMU_CXBX_CPU_MEMORY_EXECUTE;
+	}
+	return flags;
+}
 
 constexpr uint32_t AlignGuestArgument(size_t size)
 {
@@ -240,7 +264,12 @@ int QEMU_CXBX_CPU_CALL TcgHleCallback(void*, QemuCxbxCpuHleCall* call)
 		return QEMU_CXBX_CPU_INVALID_ARGUMENT;
 	}
 	if (call->gateway_kind == QEMU_CXBX_GATEWAY_KERNEL) {
-		return DispatchKernelGateway(call);
+		EmuLogInit(LOG_LEVEL::INFO, "TCG HLE kernel enter (ordinal=%u eip=0x%08X)",
+			call->gateway_id, call->registers ? call->registers->eip : 0);
+		const int result = DispatchKernelGateway(call);
+		EmuLogInit(LOG_LEVEL::INFO, "TCG HLE kernel exit (ordinal=%u status=%d eip=0x%08X)",
+			call->gateway_id, result, call->registers ? call->registers->eip : 0);
+		return result;
 	}
 	return QEMU_CXBX_CPU_UNSUPPORTED;
 }
@@ -313,7 +342,11 @@ bool MapGuestMemory(QemuCxbxCpu* cpu)
 		{ 0xD0000000u, 0xEFFFFFFFu }, { 0xF0000000u, 0xF3FFFFFFu },
 		{ 0xF8000000u, 0xFFBFFFFFu },
 	}};
-	std::lock_guard lock(g_tcgMappingMutex);
+	std::lock_guard backendLock(g_tcgBackendMutex);
+	std::lock_guard mappingLock(g_tcgMappingMutex);
+	if (g_tcgInitialMemoryImported) {
+		return true;
+	}
 	for (const auto& range : ranges) {
 		if (!MapCommittedRange(cpu, range.first, range.second)) {
 			return false;
@@ -335,7 +368,40 @@ bool MapGuestMemory(QemuCxbxCpu* cpu)
 			return false;
 		}
 	}
+	g_tcgInitialMemoryImported = true;
 	return true;
+}
+
+int CreateTcgCpu(const QemuCxbxCpuConfig* config, QemuCxbxCpu** cpu)
+{
+	std::lock_guard lock(g_tcgBackendMutex);
+	return CxbxCpuBackendGetExports()->create(config, cpu);
+}
+
+int SetTcgRegisters(QemuCxbxCpu* cpu, const QemuCxbxCpuRegisters* registers)
+{
+	std::lock_guard lock(g_tcgBackendMutex);
+	return CxbxCpuBackendGetExports()->set_registers(cpu, registers);
+}
+
+int RunTcgCpu(QemuCxbxCpu* cpu, QemuCxbxCpuRunResult* result)
+{
+	// run() is fairly serialized by the backend's round-robin ticket queue.
+	// Keeping the outer mutex here would hide waiters from that queue and allow
+	// the current thread to starve a newly-created Xbox thread.
+	return CxbxCpuBackendGetExports()->run(cpu, result);
+}
+
+int GetTcgRegisters(QemuCxbxCpu* cpu, QemuCxbxCpuRegisters* registers)
+{
+	std::lock_guard lock(g_tcgBackendMutex);
+	return CxbxCpuBackendGetExports()->get_registers(cpu, registers);
+}
+
+void DestroyTcgCpu(QemuCxbxCpu* cpu)
+{
+	std::lock_guard lock(g_tcgBackendMutex);
+	CxbxCpuBackendGetExports()->destroy(cpu);
 }
 
 uint32_t ReadFlash(uint32_t address)
@@ -350,6 +416,44 @@ uint32_t ReadFlash(uint32_t address)
 		return UINT32_MAX;
 	}
 }
+}
+
+void EmuX86_GuestCommit(uint32_t address, size_t size, void* host_pointer,
+	DWORD protection)
+{
+	if (!size || !host_pointer) return;
+	std::lock_guard backendLock(g_tcgBackendMutex);
+	std::lock_guard mappingLock(g_tcgMappingMutex);
+	if (!g_tcgMappingCpu) return;
+	const uint64_t key = (uint64_t(address) << 32) | static_cast<uint32_t>(size);
+	if (!g_tcgMappings.insert(key).second) return;
+	if (CxbxCpuBackendGetExports()->guest_commit(g_tcgMappingCpu, address, size,
+		host_pointer, TcgMemoryFlags(protection)) != QEMU_CXBX_CPU_OK) {
+		g_tcgMappings.erase(key);
+	}
+}
+
+void EmuX86_GuestProtect(uint32_t address, size_t size, DWORD protection)
+{
+	if (!size) return;
+	std::lock_guard backendLock(g_tcgBackendMutex);
+	if (g_tcgMappingCpu) {
+		CxbxCpuBackendGetExports()->guest_protect(g_tcgMappingCpu, address, size,
+			TcgMemoryFlags(protection));
+	}
+}
+
+void EmuX86_GuestDecommit(uint32_t address, size_t size)
+{
+	if (!size) return;
+	std::lock_guard backendLock(g_tcgBackendMutex);
+	std::lock_guard mappingLock(g_tcgMappingMutex);
+	if (!g_tcgMappingCpu) return;
+	const uint64_t key = (uint64_t(address) << 32) | static_cast<uint32_t>(size);
+	if (CxbxCpuBackendGetExports()->guest_decommit(g_tcgMappingCpu, address,
+		size) == QEMU_CXBX_CPU_OK) {
+		g_tcgMappings.erase(key);
+	}
 }
 
 uint32_t EmuX86_IORead(xbox::addr_xt addr, int size)
@@ -466,6 +570,7 @@ bool EmuX86_RunThread(uint32_t system_routine, uint32_t start_routine,
 {
 	const auto* backend = CxbxCpuBackendGetExports();
 	if (!backend) {
+		EmuLog(LOG_LEVEL::ERROR2, "TCG backend exports unavailable");
 		return false;
 	}
 
@@ -479,14 +584,20 @@ bool EmuX86_RunThread(uint32_t system_routine, uint32_t start_routine,
 	config.mmio_write = TcgMmioWrite;
 	config.log = TcgLog;
 
-	QemuCxbxCpu* cpu = nullptr;
-	if (backend->create(&config, &cpu) != QEMU_CXBX_CPU_OK || !cpu) {
+QemuCxbxCpu* cpu = nullptr;
+	if (CreateTcgCpu(&config, &cpu) != QEMU_CXBX_CPU_OK || !cpu) {
+		EmuLog(LOG_LEVEL::ERROR2, "TCG CPU creation failed (start=0x%08X)", start_routine);
 		return false;
 	}
+	g_tcgMappingMutex.lock();
+	g_tcgCpus.insert(cpu);
+	g_tcgMappingCpu = cpu;
+	g_tcgMappingMutex.unlock();
 
 	bool success = false;
-	do {
+		do {
 		if (!MapGuestMemory(cpu)) {
+			EmuLog(LOG_LEVEL::ERROR2, "TCG guest memory mapping failed (start=0x%08X)", start_routine);
 			break;
 		}
 
@@ -511,22 +622,53 @@ bool EmuX86_RunThread(uint32_t system_routine, uint32_t start_routine,
 		registers.ds = registers.es = registers.ss = 0x10;
 		registers.fs = 0x18;
 		registers.fs_base = fs_base;
-		if (backend->set_registers(cpu, &registers) != QEMU_CXBX_CPU_OK) {
+		if (SetTcgRegisters(cpu, &registers) != QEMU_CXBX_CPU_OK) {
+			EmuLog(LOG_LEVEL::ERROR2, "TCG register setup failed (eip=0x%08X esp=0x%08X)", registers.eip, registers.esp);
 			break;
 		}
 
 		for (;;) {
-			// HLE calls may commit new guest pages. Publish them before resuming TCG.
-			if (!MapGuestMemory(cpu)) {
-				break;
-			}
+			static uint32_t runIteration = 0;
+			++runIteration;
+			// VMManager publishes commit/protect/decommit changes incrementally.
 			QemuCxbxCpuRunResult result{};
 			result.struct_size = sizeof(result);
 			result.version = QEMU_CXBX_CPU_RUN_RESULT_VERSION;
-			if (backend->run(cpu, &result) != QEMU_CXBX_CPU_OK) {
+			EmuLogInit(LOG_LEVEL::DEBUG, "TCG backend run enter (iteration=%u eip=0x%08X)", runIteration, registers.eip);
+			int runStatus = QEMU_CXBX_CPU_HOST_ERROR;
+			__try {
+				EmuLogInit(LOG_LEVEL::INFO, "TCG invoking backend (iteration=%u)", runIteration);
+				runStatus = RunTcgCpu(cpu, &result);
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				const auto code = GetExceptionCode();
+				EmuLog(LOG_LEVEL::ERROR2, "TCG backend exception (code=0x%08X eip=0x%08X)", code, registers.eip);
+				if (exception_vector) *exception_vector = code;
 				break;
 			}
+			if (runStatus != QEMU_CXBX_CPU_OK) {
+				EmuLog(LOG_LEVEL::ERROR2, "TCG backend run failed (status=%d eip=0x%08X reason=%d)",
+					static_cast<int>(runStatus), registers.eip, static_cast<int>(result.reason));
+				break;
+			}
+			if (GetTcgRegisters(cpu, &registers) != QEMU_CXBX_CPU_OK) {
+				EmuLog(LOG_LEVEL::ERROR2, "TCG register readback failed after run");
+				break;
+			}
+			EmuLogInit(LOG_LEVEL::INFO,
+				"TCG backend run exit (reason=%d exception=%u error=0x%08X fault=0x%08X eip=0x%08X)",
+				static_cast<int>(result.reason), result.exception_vector,
+				result.error_code, result.fault_address, registers.eip);
 			if (result.reason == QEMU_CXBX_CPU_RUN_STOPPED) {
+				// The backend now consumes internal TCG interrupt/atomic exits.
+				// STOPPED is only the boundary used to hand a synthetic gateway
+				// back to this loop; resume immediately so the next run dispatches it.
+				continue;
+			}
+			if (result.reason == QEMU_CXBX_CPU_RUN_TIMESLICE ||
+				result.reason == QEMU_CXBX_CPU_RUN_INTERRUPT) {
+				// A timeslice is scheduler preemption; an interrupt boundary lets
+				// the round-robin queue run other ready Xbox contexts before resume.
 				continue;
 			}
 			if (result.reason == QEMU_CXBX_CPU_RUN_GUEST_RETURN ||
@@ -541,6 +683,10 @@ bool EmuX86_RunThread(uint32_t system_routine, uint32_t start_routine,
 		}
 	} while (false);
 
-	backend->destroy(cpu);
+	g_tcgMappingMutex.lock();
+	g_tcgCpus.erase(cpu);
+	g_tcgMappingCpu = g_tcgCpus.empty() ? nullptr : *g_tcgCpus.begin();
+	g_tcgMappingMutex.unlock();
+	DestroyTcgCpu(cpu);
 	return success;
 }

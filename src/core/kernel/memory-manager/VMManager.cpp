@@ -40,6 +40,9 @@
 #include "Logging.h"
 #include "EmuShared.h"
 #include "core\kernel\exports\EmuKrnl.h" // For InitializeListHead(), etc.
+#ifdef CXBXR_UWP
+#include "devices/x86/EmuX86.h"
+#endif
 #include "common/util/cliConfig.hpp" // For GetSessionID
 #include <assert.h>
 
@@ -2391,6 +2394,11 @@ void VMManager::UpdateMemoryPermissions(VAddr addr, size_t Size, DWORD Perms)
 	{
 		EmuLog(LOG_LEVEL::DEBUG, "VirtualProtect failed. The error code was 0x%08X", GetLastError());
 	}
+#ifdef CXBXR_UWP
+	else {
+		EmuX86_GuestProtect(addr, Size, WindowsPerms);
+	}
+#endif
 }
 
 VMAIter VMManager::CheckConflictingVMA(VAddr addr, size_t Size, MemoryRegionType Type, bool* bOverflow)
@@ -2427,6 +2435,12 @@ void VMManager::ConstructVMA(VAddr Start, size_t Size, MemoryRegionType Type, VM
 	VirtualMemoryArea& vma = vma_handle->second;
 	vma.type = VmaType;
 	vma.permissions = Perms;
+#ifdef CXBXR_UWP
+	if (VmaType == AllocatedVma) {
+		EmuX86_GuestCommit(Start, Size, reinterpret_cast<void*>(Start),
+			ConvertXboxToWinPermissions(PatchXboxPermissions(Perms)));
+	}
+#endif
 
 	// Depending on the splitting done by CarveVMA and the type of the adiacent vma's, there is no guarantee that the next
 	// or previous vma's are free. We are just going to iterate forward and backward until we find one.
@@ -2477,6 +2491,9 @@ void VMManager::DestructVMA(VAddr addr, MemoryRegionType Type, size_t Size)
 {
 	BOOL ret;
 	VMAIter it = GetVMAIterator(addr, Type); // the caller should already guarantee that the vma exists
+#ifdef CXBXR_UWP
+	EmuX86_GuestDecommit(addr, Size);
+#endif
 
 	// Don't free our memory placeholder and allocations on the contiguous region since they don't use VirtualAlloc and MapViewOfFileEx
 

@@ -56,6 +56,10 @@ uint32_t EmuX86_IORead(xbox::addr_xt addr, int size);
 void EmuX86_IOWrite(xbox::addr_xt addr, uint32_t value, int size);
 uint32_t EmuX86_Read(xbox::addr_xt addr, int size);
 void EmuX86_Write(xbox::addr_xt addr, uint32_t value, int size);
+void EmuX86_GuestCommit(uint32_t address, size_t size, void* host_pointer,
+	DWORD protection);
+void EmuX86_GuestProtect(uint32_t address, size_t size, DWORD protection);
+void EmuX86_GuestDecommit(uint32_t address, size_t size);
 // Execute one Xbox system routine on a private TCG vCPU. The guest stack and
 // all addresses are 32-bit Xbox virtual addresses owned by the VM manager.
 bool EmuX86_RunThread(uint32_t system_routine, uint32_t start_routine,

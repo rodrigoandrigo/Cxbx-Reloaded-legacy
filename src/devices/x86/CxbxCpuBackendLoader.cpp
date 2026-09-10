@@ -91,6 +91,9 @@ bool CxbxCpuBackendInitialize(std::string& error)
 		!Resolve(g_backend.destroy, "qemu_cxbx_cpu_destroy", error) ||
 		!Resolve(g_backend.map_memory, "qemu_cxbx_cpu_map_memory", error) ||
 		!Resolve(g_backend.unmap_memory, "qemu_cxbx_cpu_unmap_memory", error) ||
+		!Resolve(g_backend.guest_commit, "qemu_cxbx_cpu_guest_commit", error) ||
+		!Resolve(g_backend.guest_protect, "qemu_cxbx_cpu_guest_protect", error) ||
+		!Resolve(g_backend.guest_decommit, "qemu_cxbx_cpu_guest_decommit", error) ||
 		!Resolve(g_backend.set_registers, "qemu_cxbx_cpu_set_registers", error) ||
 		!Resolve(g_backend.get_registers, "qemu_cxbx_cpu_get_registers", error) ||
 		!Resolve(g_backend.run, "qemu_cxbx_cpu_run", error) ||

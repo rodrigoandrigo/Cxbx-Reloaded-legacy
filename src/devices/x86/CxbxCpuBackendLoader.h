@@ -10,6 +10,9 @@ struct CxbxCpuBackendExports {
 	qemu_cxbx_cpu_destroy_fn destroy{};
 	qemu_cxbx_cpu_map_memory_fn map_memory{};
 	qemu_cxbx_cpu_unmap_memory_fn unmap_memory{};
+	qemu_cxbx_cpu_guest_commit_fn guest_commit{};
+	qemu_cxbx_cpu_guest_protect_fn guest_protect{};
+	qemu_cxbx_cpu_guest_decommit_fn guest_decommit{};
 	qemu_cxbx_cpu_set_registers_fn set_registers{};
 	qemu_cxbx_cpu_get_registers_fn get_registers{};
 	qemu_cxbx_cpu_run_fn run{};

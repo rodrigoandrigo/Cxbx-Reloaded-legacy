@@ -138,7 +138,28 @@ void SetupPerTitleKeys()
 xbox::void_xt NTAPI CxbxLaunchXbe(xbox::PVOID Entry)
 {
 	EmuLogInit(LOG_LEVEL::DEBUG, "Calling XBE entry point...");
+#if defined(CXBXR_UWP)
+	const uint32_t entryAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(Entry));
+	const auto thread = xbox::KeGetCurrentThread();
+	const uint32_t threadAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(thread));
+	const auto* threadNative = reinterpret_cast<const xbox::KTHREAD*>(
+		static_cast<uintptr_t>(threadAddress));
+	const uint32_t stackPointer = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(threadNative->KernelStack));
+	const uint32_t fsBase = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
+	uint32_t exceptionVector = 0;
+	if (!EmuX86_RunThread(0, entryAddress, 0, stackPointer, fsBase,
+		&exceptionVector)) {
+		EmuLog(LOG_LEVEL::ERROR2,
+			"TCG XBE entry failed (entry=0x%08X, exception=%u)",
+			entryAddress, exceptionVector);
+	}
+#else
 	static_cast<void(*)()>(Entry)();
+#endif
 	EmuLogInit(LOG_LEVEL::DEBUG, "XBE entry point returned");
 }
 
@@ -1475,13 +1496,6 @@ static void CxbxrKrnlInitHacks()
 	CxbxInitHostD3DDevice();
 	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: host D3D11 device initialized");
 
-	// Now that the D3D11 device exists, start the FIFO threads.
-	// The puller thread calls D3D11 APIs during draw dispatch, so the
-	// device must be fully created before it can process any commands.
-	extern NV2ADevice* g_NV2A;
-	g_NV2A->StartFifoThreads();
-	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: NV2A FIFO threads started");
-
 	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: checking title mount path");
 	bool isEmuDisk = CxbxrIsPathInsideEmuDisk(relative_path);
 	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: title mount path classified (EmuDisk=%s)",
@@ -1606,6 +1620,16 @@ static void CxbxrKrnlInitHacks()
 
 	EmuLogInit(LOG_LEVEL::INFO, "Initializing x86 emulation...");
 	EmuX86_Init();
+
+	// Do not let the NV2A workers overlap object-manager, drive, path or TCG
+	// bootstrap.  They may allocate guest-visible resources while those global
+	// structures are still being assembled.  The D3D11 device is ready by this
+	// point, and no Xbox code has started yet, so this remains early enough for
+	// the first guest FIFO submission without introducing a startup race.
+	extern NV2ADevice* g_NV2A;
+	g_NV2A->StartFifoThreads();
+	EmuLogInit(LOG_LEVEL::INFO, "Bootstrap: NV2A FIFO threads started");
+
 	EmuLogInit(LOG_LEVEL::INFO, "Starting system event thread...");
 	// Start the event thread
 	GuestAllocation<xbox::HANDLE> threadHandleAllocation;
@@ -1632,8 +1656,6 @@ static void CxbxrKrnlInitHacks()
 	// g_AffinityPolicy->SetAffinityXbox();
 
 	xbox::KeRaiseIrqlToDpcLevel();
-	extern NV2ADevice* g_NV2A;
-
 	while (!CxbxEmbedRuntimeStopRequested()) {
 		xbox::KeWaitForDpc();
 		if (CxbxEmbedRuntimeStopRequested()) {

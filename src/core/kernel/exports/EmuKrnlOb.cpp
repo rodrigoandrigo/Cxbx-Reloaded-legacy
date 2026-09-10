@@ -853,6 +853,12 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 
 	ObjectBodySize = ALIGN_UP(ObjectBodySize, ULONG);
 
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP object manager: allocating named object (body=%u name=%u)",
+		static_cast<unsigned>(ObjectBodySize),
+		static_cast<unsigned>(ElementName.Length));
+#endif
 	POBJECT_HEADER_NAME_INFO ObjectNameInfo = (POBJECT_HEADER_NAME_INFO)ObjectType->AllocateProcedure(
 		sizeof(OBJECT_HEADER_NAME_INFO) + offsetof(OBJECT_HEADER, Body) +
 		ObjectBodySize + ElementName.Length, ObjectType->PoolTag);
@@ -860,7 +866,57 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 	if (ObjectNameInfo == NULL) {
 		RETURN(X_STATUS_INSUFFICIENT_RESOURCES);
 	}
+#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP object manager: named object allocated at 0x%08X",
+		static_cast<unsigned>(reinterpret_cast<uintptr_t>(ObjectNameInfo)));
+#endif
 
+	#if defined(CXBXR_UWP) && defined(_WIN64)
+	// Object-manager allocations intentionally live in the 32-bit guest range
+	// (normally 0xD...).  Do all host-side initialization through explicitly
+	// zero-extended native pointers.  Passing the nested __ptr32 Buffer members
+	// directly to RtlCopyMemory allowed MSVC to sign-extend them and caused the
+	// packaged x64 build to fault in VCRUNTIME140 during CdRom0 creation.
+	const uint32_t nameInfoAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(ObjectNameInfo));
+	auto* objectNameInfoNative = reinterpret_cast<OBJECT_HEADER_NAME_INFO*>(
+		static_cast<uintptr_t>(nameInfoAddress));
+	auto* objectHeaderNative = reinterpret_cast<OBJECT_HEADER*>(
+		objectNameInfoNative + 1);
+	const uint32_t storedNameAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(&objectHeaderNative->Body) + ObjectBodySize);
+	const uint32_t elementBufferAddress = static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(ElementName.Buffer));
+
+	objectNameInfoNative->ChainLink = NULL;
+	objectNameInfoNative->Directory = NULL;
+	objectNameInfoNative->Name.Buffer = reinterpret_cast<PSTR>(
+		static_cast<uintptr_t>(storedNameAddress));
+	objectNameInfoNative->Name.Length = ElementName.Length;
+	objectNameInfoNative->Name.MaximumLength = ElementName.Length;
+
+	volatile CHAR* storedNameNative = reinterpret_cast<volatile CHAR*>(
+		static_cast<uintptr_t>(storedNameAddress));
+	const volatile CHAR* elementBufferNative = reinterpret_cast<const volatile CHAR*>(
+		static_cast<uintptr_t>(elementBufferAddress));
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP object manager: copying name (source=0x%08X destination=0x%08X length=%u)",
+		elementBufferAddress, storedNameAddress,
+		static_cast<unsigned>(ElementName.Length));
+	for (USHORT index = 0; index < ElementName.Length; ++index) {
+		storedNameNative[index] = elementBufferNative[index];
+	}
+	EmuLogInit(LOG_LEVEL::INFO, "UWP object manager: name copied");
+
+	objectHeaderNative->PointerCount = 1;
+	objectHeaderNative->HandleCount = 0;
+	objectHeaderNative->Type = ObjectType;
+	objectHeaderNative->Flags = OB_FLAG_NAMED_OBJECT;
+
+	*Object = reinterpret_cast<PVOID>(static_cast<uintptr_t>(
+		static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&objectHeaderNative->Body))));
+	#else
 	POBJECT_HEADER ObjectHeader = (POBJECT_HEADER)(ObjectNameInfo + 1);
 	ObjectNameInfo->ChainLink = NULL;
 	ObjectNameInfo->Directory = NULL;
@@ -876,6 +932,7 @@ XBSYSAPI EXPORTNUM(239) xbox::ntstatus_xt NTAPI xbox::ObCreateObject
 	ObjectHeader->Flags = OB_FLAG_NAMED_OBJECT;
 
 	*Object = &ObjectHeader->Body;
+	#endif
 
 	LOG_FUNC_BEGIN_ARG_RESULT
 		LOG_FUNC_ARG_RESULT(Object)

@@ -1014,11 +1014,30 @@ static xbox::void_xt KiExecuteApc()
 		xbox::PVOID SystemArgument1 = Apc->SystemArgument1;
 		xbox::PVOID SystemArgument2 = Apc->SystemArgument2;
 
+#if defined(CXBXR_UWP)
+		// Resolve the two kernel callbacks supplied by the host kernel itself.
+		// Their fields are stored as Xbox 32-bit pointers, so invoking the field
+		// directly would jump to a truncated x64 address. Guest callbacks remain
+		// pending for the TCG runner and are not called as native functions.
+		const uint32_t routineAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(Apc->KernelRoutine));
+		if (routineAddress == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&xbox::KiSuspendNop))) {
+			xbox::KiSuspendNop(Apc, &NormalRoutine, &NormalContext,
+				&SystemArgument1, &SystemArgument2);
+		}
+		else if (routineAddress == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&xbox::KiFreeUserApc))) {
+			xbox::KiFreeUserApc(Apc, &NormalRoutine, &NormalContext,
+				&SystemArgument1, &SystemArgument2);
+		}
+#else
 		(Apc->KernelRoutine)(Apc, &NormalRoutine, &NormalContext, &SystemArgument1, &SystemArgument2);
+#endif
 
+#if !defined(CXBXR_UWP)
 		if (NormalRoutine != xbox::zeroptr) {
 			(NormalRoutine)(NormalContext, SystemArgument1, SystemArgument2);
 		}
+#endif
 
 		xbox::KiApcListMtx.lock();
 	}

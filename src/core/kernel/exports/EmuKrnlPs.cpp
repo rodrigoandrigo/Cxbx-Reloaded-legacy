@@ -47,6 +47,11 @@
 #include "core\kernel\memory-manager\VMManager.h"
 #include "devices\x86\EmuX86.h"
 
+#if defined(CXBXR_UWP)
+extern xbox::void_xt NTAPI system_events(xbox::PVOID arg);
+extern xbox::void_xt NTAPI CxbxLaunchXbe(xbox::PVOID entry);
+#endif
+
 // prevent name collisions
 namespace NtDll
 {
@@ -123,6 +128,12 @@ static unsigned int WINAPI PCSTProxy
 #endif
 #if defined(CXBXR_UWP)
 	EmuGenerateFS(eThread);
+	// PsCreateSystemThreadEx waits for the proxy to leave Initialized before it
+	// returns to the caller. The legacy native path transitions this state in
+	// the scheduler; the UWP/TCG path has no scheduler transition, so publish it
+	// explicitly once the guest thread context is ready.
+	eThreadNative->Tcb.State = xbox::Running;
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: FS bootstrap returned");
 #elif !defined(ENABLE_KTHREAD_SWITCHING)
 	EmuGenerateFS(eThread, Host2XbStackBaseReserved, Host2XbStackSizeReserved);
 #else
@@ -144,6 +155,9 @@ static unsigned int WINAPI PCSTProxy
 		params.TlsDataSize);
 
 	xbox::KiExecuteKernelApc();
+	#if defined(CXBXR_UWP)
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: kernel APC checkpoint returned");
+	#endif
 
 #if defined(CXBXR_UWP)
 	const uint32_t systemRoutine = static_cast<uint32_t>(
@@ -155,11 +169,28 @@ static unsigned int WINAPI PCSTProxy
 		reinterpret_cast<uintptr_t>(StartFrameNative->StartRoutine));
 	const uint32_t startContext = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(StartFrameNative->StartContext));
+	if (startRoutine == static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(&system_events))) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: running host system event loop");
+		system_events(reinterpret_cast<xbox::PVOID>(
+			static_cast<uintptr_t>(startContext)));
+		xbox::PsTerminateSystemThread(X_STATUS_SUCCESS);
+		return 0;
+	}
+	if (startRoutine == static_cast<uint32_t>(
+		reinterpret_cast<uintptr_t>(&CxbxLaunchXbe))) {
+		EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: running host XBE launcher");
+		CxbxLaunchXbe(reinterpret_cast<xbox::PVOID>(
+			static_cast<uintptr_t>(startContext)));
+		xbox::PsTerminateSystemThread(X_STATUS_SUCCESS);
+		return 0;
+	}
 	const uint32_t stackPointer = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(eThreadNative->Tcb.KernelStack));
 	const uint32_t fsBase = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
 	uint32_t exceptionVector = 0;
+	EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: entering TCG (start=0x%08X, stack=0x%08X)", startRoutine, stackPointer);
 	if (!EmuX86_RunThread(guestSystemRoutine, startRoutine, startContext,
 		stackPointer, fsBase, &exceptionVector)) {
 		EmuLog(LOG_LEVEL::ERROR2,

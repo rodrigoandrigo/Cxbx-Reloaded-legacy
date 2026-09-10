@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define QEMU_CXBX_CPU_ABI_VERSION UINT32_C(0x00010000)
+#define QEMU_CXBX_CPU_ABI_VERSION UINT32_C(0x00010002)
 #define QEMU_CXBX_CPU_ABI_MAJOR(version) ((uint32_t)(version) >> 16)
 
 // Synthetic Xbox kernel addresses intercepted by the TCG backend before an
@@ -57,7 +57,16 @@ typedef enum QemuCxbxCpuRunReason {
 	QEMU_CXBX_CPU_RUN_GUEST_EXCEPTION,
 	QEMU_CXBX_CPU_RUN_HOST_REQUEST,
 	QEMU_CXBX_CPU_RUN_UNHANDLED_HLE,
+	// The deterministic icount budget expired; registers contain the resume point.
+	QEMU_CXBX_CPU_RUN_TIMESLICE,
+	// A guest interrupt boundary was reached independently of host preemption.
+	QEMU_CXBX_CPU_RUN_INTERRUPT,
 } QemuCxbxCpuRunReason;
+
+typedef enum QemuCxbxCpuInterruptFlags {
+	QEMU_CXBX_CPU_INTERRUPT_HARD = 1u << 0,
+	QEMU_CXBX_CPU_INTERRUPT_NMI = 1u << 1,
+} QemuCxbxCpuInterruptFlags;
 
 typedef enum QemuCxbxCpuMemoryFlags {
 	QEMU_CXBX_CPU_MEMORY_READ = 1u << 0,
@@ -168,6 +177,13 @@ typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_map_memory_fn)(
 	void* host_address, uint32_t flags);
 typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_unmap_memory_fn)(
 	QemuCxbxCpu* cpu, uint32_t guest_address, uint64_t size);
+typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_guest_commit_fn)(
+	QemuCxbxCpu* cpu, uint32_t guest_address, uint64_t size,
+	void* host_address, uint32_t flags);
+typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_guest_protect_fn)(
+	QemuCxbxCpu* cpu, uint32_t guest_address, uint64_t size, uint32_t flags);
+typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_guest_decommit_fn)(
+	QemuCxbxCpu* cpu, uint32_t guest_address, uint64_t size);
 typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_set_registers_fn)(
 	QemuCxbxCpu* cpu, const QemuCxbxCpuRegisters* registers);
 typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_get_registers_fn)(
@@ -175,7 +191,7 @@ typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_get_registers_fn)(
 typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_run_fn)(
 	QemuCxbxCpu* cpu, QemuCxbxCpuRunResult* result);
 typedef int (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_interrupt_fn)(
-	QemuCxbxCpu* cpu, uint32_t vector);
+	QemuCxbxCpu* cpu, uint32_t interrupt_flags);
 typedef void (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_request_stop_fn)(QemuCxbxCpu* cpu);
 typedef void (QEMU_CXBX_CPU_CALL *qemu_cxbx_cpu_flush_fn)(
 	QemuCxbxCpu* cpu, uint32_t guest_address, uint64_t size);
