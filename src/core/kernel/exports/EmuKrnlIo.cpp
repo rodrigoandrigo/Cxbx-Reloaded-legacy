@@ -386,32 +386,56 @@ XBSYSAPI EXPORTNUM(65) xbox::ntstatus_xt NTAPI xbox::IoCreateDevice
 		CreatedDeviceObject = nullptr;
 	}
 	else {
+		#if defined(CXBXR_UWP) && defined(_WIN64)
+		// ObCreateObject returns an Xbox 32-bit pointer.  Keep the ABI value for
+		// object-manager calls, but explicitly zero-extend it before native host
+		// code dereferences the device object.  Letting MSVC promote the local
+		// __ptr32 value directly can retain unrelated high stack bits (for
+		// example 0x000001BAD00D0600 instead of 0xD00D0600) and crash in memset.
+		const uint32_t createdDeviceAddress = static_cast<uint32_t>(
+			reinterpret_cast<uintptr_t>(CreatedDeviceObject));
+		CreatedDeviceObject = reinterpret_cast<PDEVICE_OBJECT>(
+			static_cast<uintptr_t>(createdDeviceAddress));
+		auto* createdDeviceNative = reinterpret_cast<DEVICE_OBJECT*>(
+			static_cast<uintptr_t>(createdDeviceAddress));
+		#else
+		const uintptr_t createdDeviceAddress = reinterpret_cast<uintptr_t>(
+			CreatedDeviceObject);
+		auto* createdDeviceNative = CreatedDeviceObject;
+		#endif
+
 		/* Clear the whole Object and extension so we don't null stuff manually */
-		std::memset(CreatedDeviceObject, 0, TotalSize);
+		std::memset(createdDeviceNative, 0, TotalSize);
 
 		/* Setup the Type and Size. */
-		CreatedDeviceObject->Type = IO_TYPE_DEVICE;
-		CreatedDeviceObject->Size = sizeof(DEVICE_OBJECT) + DeviceExtensionSize;
+		createdDeviceNative->Type = IO_TYPE_DEVICE;
+		createdDeviceNative->Size = sizeof(DEVICE_OBJECT) + DeviceExtensionSize;
 
 		/* Set Device Object Data */
-		CreatedDeviceObject->DeviceType = static_cast<uchar_xt>(DeviceType);
-		CreatedDeviceObject->DeviceExtension = DeviceExtensionSize ? CreatedDeviceObject + 1 : nullptr;
-		CreatedDeviceObject->StackSize = 1;
-		CreatedDeviceObject->AlignmentRequirement = 0;
+		createdDeviceNative->DeviceType = static_cast<uchar_xt>(DeviceType);
+		createdDeviceNative->DeviceExtension = DeviceExtensionSize
+			? reinterpret_cast<PVOID>(static_cast<uintptr_t>(
+				createdDeviceAddress + sizeof(DEVICE_OBJECT)))
+			: nullptr;
+		createdDeviceNative->StackSize = 1;
+		createdDeviceNative->AlignmentRequirement = 0;
 
 		/* Link the Extension to Object */
-		if (CreatedDeviceObject->DeviceExtension) {
-			PIDE_DISK_EXTENSION DeviceObjectExtension = reinterpret_cast<PIDE_DISK_EXTENSION>(CreatedDeviceObject->DeviceExtension);
+		if (createdDeviceNative->DeviceExtension) {
+			const uint32_t extensionAddress = static_cast<uint32_t>(
+				reinterpret_cast<uintptr_t>(createdDeviceNative->DeviceExtension));
+			auto* DeviceObjectExtension = reinterpret_cast<IDE_DISK_EXTENSION*>(
+				static_cast<uintptr_t>(extensionAddress));
 			DeviceObjectExtension->DeviceObject = CreatedDeviceObject;
 		}
 
 		/* Set the Flags */
-		CreatedDeviceObject->Flags = X_DO_DEVICE_INITIALIZING;
+		createdDeviceNative->Flags = X_DO_DEVICE_INITIALIZING;
 		if (Exclusive) {
-			CreatedDeviceObject->Flags |= X_DO_EXCLUSIVE;
+			createdDeviceNative->Flags |= X_DO_EXCLUSIVE;
 		}
 		if (DeviceHasName) {
-			CreatedDeviceObject->Flags |= X_DO_DEVICE_HAS_NAME;
+			createdDeviceNative->Flags |= X_DO_DEVICE_HAS_NAME;
 		}
 
 		/* Create the Device Lock */
@@ -420,15 +444,15 @@ XBSYSAPI EXPORTNUM(65) xbox::ntstatus_xt NTAPI xbox::IoCreateDevice
 			DeviceType == xbox::FILE_DEVICE_MEDIA_BOARD ||
 			DeviceType == xbox::FILE_DEVICE_MEMORY_UNIT) {
 			/* Initialize Lock Event */
-			KeInitializeEvent(&CreatedDeviceObject->DeviceLock, SynchronizationEvent, TRUE);
+			KeInitializeEvent(&createdDeviceNative->DeviceLock, SynchronizationEvent, TRUE);
 
-			CreatedDeviceObject->MountedOrSelfDevice = nullptr;
+			createdDeviceNative->MountedOrSelfDevice = nullptr;
 		}
 		else {
-			CreatedDeviceObject->MountedOrSelfDevice = CreatedDeviceObject;
+			createdDeviceNative->MountedOrSelfDevice = CreatedDeviceObject;
 		}
 
-		KeInitializeDeviceQueue(&CreatedDeviceObject->DeviceQueue);
+		KeInitializeDeviceQueue(&createdDeviceNative->DeviceQueue);
 
 		/* Insert the Object */
 		xbox::HANDLE handle;
@@ -455,7 +479,7 @@ XBSYSAPI EXPORTNUM(65) xbox::ntstatus_xt NTAPI xbox::IoCreateDevice
 		if (X_NT_SUCCESS(result)) {
 			/* Close the temporary handle and return to caller */
 			NtClose(handle);
-			CreatedDeviceObject->DriverObject = DriverObject;
+			createdDeviceNative->DriverObject = DriverObject;
 		}
 		else {
 			CreatedDeviceObject = nullptr;

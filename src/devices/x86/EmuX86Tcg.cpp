@@ -628,8 +628,9 @@ QemuCxbxCpu* cpu = nullptr;
 		}
 
 		for (;;) {
-			static uint32_t runIteration = 0;
-			++runIteration;
+			static std::atomic_uint32_t runIterationCounter{ 0 };
+			const uint32_t runIteration =
+				runIterationCounter.fetch_add(1, std::memory_order_relaxed) + 1;
 			// VMManager publishes commit/protect/decommit changes incrementally.
 			QemuCxbxCpuRunResult result{};
 			result.struct_size = sizeof(result);
@@ -656,9 +657,10 @@ QemuCxbxCpu* cpu = nullptr;
 				break;
 			}
 			EmuLogInit(LOG_LEVEL::INFO,
-				"TCG backend run exit (reason=%d exception=%u error=0x%08X fault=0x%08X eip=0x%08X)",
+				"TCG backend run exit (reason=%d exception=%u error=0x%08X fault=0x%08X eip=0x%08X esp=0x%08X ebp=0x%08X)",
 				static_cast<int>(result.reason), result.exception_vector,
-				result.error_code, result.fault_address, registers.eip);
+				result.error_code, result.fault_address, registers.eip,
+				registers.esp, registers.ebp);
 			if (result.reason == QEMU_CXBX_CPU_RUN_STOPPED) {
 				// The backend now consumes internal TCG interrupt/atomic exits.
 				// STOPPED is only the boundary used to hand a synthetic gateway
