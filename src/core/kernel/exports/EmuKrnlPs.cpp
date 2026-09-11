@@ -164,11 +164,23 @@ static unsigned int WINAPI PCSTProxy
 		reinterpret_cast<uintptr_t>(StartFrameNative->SystemRoutine));
 	const uint32_t startupProxy = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(&PspSystemThreadStartup));
-	const uint32_t guestSystemRoutine = systemRoutine == startupProxy ? 0 : systemRoutine;
+	uint32_t guestSystemRoutine = systemRoutine == startupProxy ? 0 : systemRoutine;
 	const uint32_t startRoutine = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(StartFrameNative->StartRoutine));
 	const uint32_t startContext = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(StartFrameNative->StartContext));
+	// The guest XapiThreadStartup walks XAPI's process-wide thread callback
+	// list before invoking StartRoutine. That list belongs to the native/HLE
+	// XAPI initialization path and is not constructed in the UWP TCG image.
+	// EmuGenerateFS has already populated this thread's TLS, so mirror the
+	// legacy XapiThreadStartup HLE patch and invoke StartRoutine directly for
+	// title threads that carry TLS. Preserve custom TLS-less system routines.
+	const bool bypassXapiThreadStartup = params.TlsDataSize != 0 &&
+		eThreadNative->Tcb.TlsData != xbox::zeroptr &&
+		systemRoutine != startupProxy;
+	if (bypassXapiThreadStartup) {
+		guestSystemRoutine = 0;
+	}
 	if (startRoutine == static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(&system_events))) {
 		EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: running host system event loop");
@@ -190,7 +202,12 @@ static unsigned int WINAPI PCSTProxy
 	const uint32_t fsBase = static_cast<uint32_t>(
 		reinterpret_cast<uintptr_t>(EmuKeGetPcrHost()));
 	uint32_t exceptionVector = 0;
-	EmuLogInit(LOG_LEVEL::INFO, "UWP thread proxy: entering TCG (start=0x%08X, stack=0x%08X)", startRoutine, stackPointer);
+	EmuLogInit(LOG_LEVEL::INFO,
+		"UWP thread proxy: entering TCG (system=0x%08X, start=0x%08X, "
+		"context=0x%08X, stack=0x%08X, tls=%u, bypass-xapi=%u)",
+		systemRoutine, startRoutine, startContext, stackPointer,
+		static_cast<unsigned>(params.TlsDataSize),
+		bypassXapiThreadStartup ? 1u : 0u);
 	if (!EmuX86_RunThread(guestSystemRoutine, startRoutine, startContext,
 		stackPointer, fsBase, &exceptionVector)) {
 		EmuLog(LOG_LEVEL::ERROR2,

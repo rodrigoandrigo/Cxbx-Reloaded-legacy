@@ -27,13 +27,21 @@
 // NOTE: This file is intended to be used only with Cxbxkrnl.cpp file.
 // NOTE2: If need to extern function/variable, please do in Cxbxkrnl.h file.
 
-static void CxbxrKrnlSetupDummyHeader() {
+void CxbxrKrnlEnsureDummyHeader() {
 	// TODO : The following seems to cause a crash when booting the game "Forza Motorsport",
 	// according to https://github.com/Cxbx-Reloaded/Cxbx-Reloaded/issues/101#issuecomment-277230140
 
 	// Create a fake kernel header for XapiRestrictCodeSelectorLimit
 	// Thanks advancingdragon / DirtBox
 	PDUMMY_KERNEL DummyKernel = (PDUMMY_KERNEL)XBOX_KERNEL_BASE;
+	if (DummyKernel->DosHeader.e_lfanew == sizeof(IMAGE_DOS_HEADER) &&
+		DummyKernel->FileHeader.SizeOfOptionalHeader == 0 &&
+		DummyKernel->FileHeader.NumberOfSections == 1 &&
+		memcmp(DummyKernel->SectionHeader.Name, "DONGS", 5) == 0) {
+		return;
+	}
+
+	const LONG previous_lfanew = DummyKernel->DosHeader.e_lfanew;
 	memset(DummyKernel, 0, sizeof(DUMMY_KERNEL));
 
 	// XapiRestrictCodeSelectorLimit only checks these fields.
@@ -42,7 +50,9 @@ static void CxbxrKrnlSetupDummyHeader() {
 	DummyKernel->FileHeader.NumberOfSections = 1;
 	// as long as this doesn't start with "INIT"
 	strncpy_s((PSTR)DummyKernel->SectionHeader.Name, 8, "DONGS", 8);
-	EmuLogInit(LOG_LEVEL::INFO, "Initialized dummy kernel image header.");
+	EmuLogInit(LOG_LEVEL::INFO,
+		"Restored dummy kernel image header at 0x%08X (previous e_lfanew=0x%08X).",
+		XBOX_KERNEL_BASE, static_cast<unsigned>(previous_lfanew));
 }
 
 // TODO: If possible, maybe make this as optional patch when kernel emulation is fully done.

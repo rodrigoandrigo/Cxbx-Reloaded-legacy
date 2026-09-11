@@ -91,6 +91,8 @@ extern "C" {
 
 /*! base address of Cxbx host executable, see Cxbx project options, Linker, Advanced, Base Address */
 #define CXBX_BASE_ADDR     XBE_IMAGE_BASE
+
+void CxbxrKrnlEnsureDummyHeader();
 #define CXBX_BASE_OF_CODE  0x00001000
 
 // NT_TIB (Thread Information Block) offsets - see https://www.microsoft.com/msj/archive/S2CE.aspx

@@ -1298,7 +1298,7 @@ static void CxbxrKrnlInitHacks()
 	// VerifyHLEDataBase();
 #endif
 
-	CxbxrKrnlSetupDummyHeader();
+	CxbxrKrnlEnsureDummyHeader();
 
 	// Read which components need to be LLE'ed per user request
 	{

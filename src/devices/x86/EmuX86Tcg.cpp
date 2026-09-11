@@ -596,6 +596,10 @@ QemuCxbxCpu* cpu = nullptr;
 
 	bool success = false;
 		do {
+		// Xbox XAPI inspects the kernel PE header while creating title threads.
+		// Keep this invariant intact even if guest code touched the physical page
+		// after the initial kernel bootstrap.
+		CxbxrKrnlEnsureDummyHeader();
 		if (!MapGuestMemory(cpu)) {
 			EmuLog(LOG_LEVEL::ERROR2, "TCG guest memory mapping failed (start=0x%08X)", start_routine);
 			break;
